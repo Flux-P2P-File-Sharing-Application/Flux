@@ -19,7 +19,6 @@ ENCODING_FORMAT = "utf-8"
 user_name = input("Enter username: ")
 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 client_socket.connect((SERVER_IP, SERVER_PORT))
-# client_socket.setblocking(False)
 
 # Encode the username and prepare the header
 encoded_username = user_name.encode(ENCODING_FORMAT)
@@ -35,14 +34,11 @@ while True:
         request_header = f"r{len(encoded_recipient):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
         client_socket.send(request_header + encoded_recipient)
 
-        # Receive and decode the response type
         response_type = client_socket.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
         logging.log(level=logging.DEBUG, msg=f"Response type: {response_type}")
 
-        # Receive and decode the response length
         response_length = int(client_socket.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT).strip())
         
-        # Receive the actual response
         response = client_socket.recv(response_length)
         
         if response_type == "r":
