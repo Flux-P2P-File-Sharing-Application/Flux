@@ -2,13 +2,11 @@ import select
 import socket
 import logging
 import sys
+import os
 
 import msgpack
 
 from exceptions import ExceptionCode, RequestException
-
-# Configure logging
-logging.basicConfig(filename="./server.log", level=logging.DEBUG)
 
 # Constants for header lengths and formats
 HEADER_TYPE_LENGTH = 1
@@ -16,6 +14,19 @@ HEADER_MESSAGE_LENGTH = 7
 SERVER_IP = "127.0.0.1"
 SERVER_PORT = 1234
 ENCODING_FORMAT = "utf-8"
+
+# Ensure the logs directory exists
+log_directory = "./logs"
+os.makedirs(log_directory, exist_ok=True)
+
+log_filename = f"{log_directory}/server_{SERVER_IP}.log"
+logging.basicConfig(
+    level=logging.DEBUG,
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
 
 # Create a TCP/IP socket
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -29,7 +40,7 @@ server_socket.listen(5)
 # List of active sockets including the server socket
 active_sockets = [server_socket]
 # Mapping of usernames to addresses (IP, PORT)
-clients: dict[str, tuple[str, int]] = {}
+clients: dict[str, str] = {}
 
 # Function to receive messages from the client
 def receive_message(client_socket: socket.socket) -> dict[str, str | bytes]:
@@ -76,7 +87,7 @@ def handle_client_socket(notified_socket: socket.socket) -> None:
             user_data = receive_message(client_socket)
             if user_data["type"] == "n":
                 active_sockets.append(client_socket)
-                clients[user_data["query"].decode(ENCODING_FORMAT)] = client_address
+                clients[user_data["query"].decode(ENCODING_FORMAT)] = client_address[0]
                 logging.log(
                     level=logging.DEBUG,
                     msg=(
@@ -112,7 +123,7 @@ def handle_client_socket(notified_socket: socket.socket) -> None:
                         level=logging.DEBUG,
                         msg=f"Valid request: {response_data}",
                     )
-                    data: bytes = msgpack.packb(response_data)
+                    data: bytes = response_data.encode(ENCODING_FORMAT)
                     header = f"r{len(data):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
                     notified_socket.send(header + data)
                 else:

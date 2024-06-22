@@ -1,13 +1,11 @@
 import logging
 import select
 import socket
+import os
 
 import msgpack
 
 from exceptions import ExceptionCode, RequestException
-
-# Configure logging
-logging.basicConfig(filename="./client.log", level=logging.DEBUG)
 
 # Constants for header lengths and formats
 HEADER_TYPE_LENGTH = 1
@@ -18,11 +16,23 @@ ENCODING_FORMAT = "utf-8"
 
 # Client settings
 CLIENT_IP = "127.0.0.1"
-CLIENT_SEND_PORT = 5670
-CLIENT_RECV_PORT = 4323
+CLIENT_SEND_PORT = 5672
+CLIENT_RECV_PORT = 4322
 
 # Get the username from the user
 user_name = input("Enter username: ")
+
+# Ensure the logs directory exists
+log_directory = "./logs"
+os.makedirs(log_directory, exist_ok=True)
+
+# Configure logging
+log_filename = f"{log_directory}/client_{user_name}_{CLIENT_IP}.log"
+logging.basicConfig(
+    filename=log_filename, level=logging.DEBUG
+)
+
+
 client_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # Send socket
 client_recv_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # Receive socket
 
@@ -39,7 +49,7 @@ encoded_username = user_name.encode(ENCODING_FORMAT)
 username_header = f"n{len(encoded_username):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
 client_send_socket.send(username_header + encoded_username)
 
-receiving = False
+# receiving = False
 connected = [client_recv_socket]
 
 def handle_sending():
@@ -61,19 +71,24 @@ def handle_sending():
         response = client_send_socket.recv(response_length)
         
         if response_type == "r":
-            # If response type is 'r', unpack recipient address and connect to it
-            recipient_addr = msgpack.unpackb(response, use_list=False)
+            # If response type is 'r', unpack the recipient address
+            recipient_addr = response.decode(ENCODING_FORMAT)
             logging.log(level=logging.DEBUG, msg=f"Response: {recipient_addr}")
             
-            # Close and reopen the send socket to connect to the recipient
-            client_send_socket.close()
-            client_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_send_socket.connect((recipient_addr[0], CLIENT_RECV_PORT))
-            
-            # Send a test message
-            msg = "Test message".encode(ENCODING_FORMAT)
-            header = f"m{len(msg):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
-            client_send_socket.send(header + msg)
+            # Connect to the recipient's client socket
+            client_peer_socket = socket.socket(
+                socket.AF_INET, socket.SOCK_STREAM
+            )
+            client_peer_socket.connect((recipient_addr, CLIENT_RECV_PORT))
+            while True:
+                # Send message to the recipient
+                msg = input(f"\nEnter message for {recipient_username.encode(ENCODING_FORMAT)}: ")
+                msg = msg.encode(ENCODING_FORMAT)
+                if msg == b"exit":
+                    break
+                header = f"m{len(msg):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
+                client_peer_socket.send(header + msg)
+
         elif response_type == "e":
             # If response type is 'e', unpack the error message
             error: RequestException = msgpack.unpackb(response, object_hook=RequestException.from_dict, raw=False)
@@ -100,7 +115,7 @@ def receive_message(socket: socket.socket) -> str:
 def handle_receiving():
     global client_send_socket, client_recv_socket, user_name
 
-    read_sockets, _, __ = select.select(connected, [], [])
+    read_sockets, _, __ = select.select(connected, [], [], 0.1)
     for notified_socket in read_sockets:
         if notified_socket == client_recv_socket:
             # Accept new connection from peer
@@ -137,9 +152,7 @@ def handle_receiving():
                     if res_type == "l":
                         # Log the username of the incoming connection
                         user_name = response.decode(ENCODING_FORMAT)
-                        logging.info(
-                            f"Username {user_name} is trying to send a message"
-                        )
+                        print(f"User {user_name} is trying to send a message")
                     else:
                         exception = msgpack.unpackb(
                             response,
@@ -150,12 +163,13 @@ def handle_receiving():
                         raise exception
             except RequestException as e:
                 logging.log(level=logging.ERROR, msg=e)
-                return
+                break
         else:
             try:
                 # Receive and log the message
                 msg: str = receive_message(notified_socket)
-                logging.info(f"Received message {msg} from {user_name}")
+                print(f"{user_name} says: {msg}")
+
             except RequestException as e:
                 if e.code == ExceptionCode.DISCONNECT:
                     try:
@@ -163,8 +177,12 @@ def handle_receiving():
                     except ValueError:
                         logging.info("already removed")
                 logging.log(level=logging.ERROR, msg=f"Exception: {e.msg}")
-                return
+                break
 
-while True:
-    handle_sending()
-    handle_receiving()
+def cont_comm():
+    while True:
+        handle_sending()
+        handle_receiving()
+
+
+cont_comm()
