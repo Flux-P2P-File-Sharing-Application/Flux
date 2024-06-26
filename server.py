@@ -67,7 +67,7 @@ def receive_message(client_socket: socket.socket) -> dict[str, str | bytes]:
         message_length = int(client_socket.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT))
         query = client_socket.recv(message_length)
         #here query is the username
-        logging.debug(f"Received packet: TYPE {message_type} QUERY {query}")
+        logging.debug(f"Received packet: TYPE {message_type} QUERY {query} from {client_socket.getpeername()}")
         return {"type": message_type, "query": query}
 
 # Function to handle client sockets
