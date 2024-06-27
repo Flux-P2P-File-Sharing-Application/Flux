@@ -11,7 +11,7 @@ from exceptions import ExceptionCode, RequestException
 # Constants for header lengths and formats
 HEADER_TYPE_LENGTH = 1
 HEADER_MESSAGE_LENGTH = 7
-SERVER_IP = "127.0.0.1"
+SERVER_IP = socket.gethostbyname(socket.gethostname())
 SERVER_PORT = 1234
 ENCODING_FORMAT = "utf-8"
 
@@ -70,11 +70,8 @@ def receive_message(client_socket: socket.socket) -> dict[str, str | bytes]:
         logging.debug(f"Received packet: TYPE {message_type} QUERY {query} from {client_socket.getpeername()}")
         return {"type": message_type, "query": query}
 
-# Function to handle client sockets
-def handle_client_socket(notified_socket: socket.socket) -> None:
-    """
-    Handle a client socket that has data to be processed.
-    """
+def handle_requests(notified_socket: socket.socket) -> None:
+
     global clients
     global active_sockets
     logging.info(f"CLIENTS {clients}")
@@ -85,17 +82,38 @@ def handle_client_socket(notified_socket: socket.socket) -> None:
         try:
             # Process initial message from new client
             user_data = receive_message(client_socket)
+            username = user_data["query"].decode(ENCODING_FORMAT)
+            active_sockets.append(client_socket)
+
             if user_data["type"] == "n":
-                active_sockets.append(client_socket)
-                clients[user_data["query"].decode(ENCODING_FORMAT)] = client_address[0]
-                logging.log(
-                    level=logging.DEBUG,
-                    msg=(
-                        "Accepted new connection from"
-                        f" {client_address[0]}:{client_address[1]}"
-                        f" username: {user_data['query'].decode(ENCODING_FORMAT)}"
-                    ),
+                address= clients.get(username)
+                logging.debug(
+                    f"Registration request for username {username} from address {client_address}"
                 )
+                # Check if the username is already registered
+                if address is None:
+                    clients[username] = client_address[0]
+                    logging.log(
+                        level=logging.DEBUG,
+                        msg=(
+                            "Accepted new connection from"
+                            f" {client_address[0]}:{client_address[1]}"
+                            f" username: {user_data['query'].decode(ENCODING_FORMAT)}"
+                        ),
+                    )
+                    client_socket.send(b"n")
+                # Check if the address is already registered
+                else:
+                    if address != client_address[0]:
+                        raise RequestException(
+                            msg=f"User with username {address} already exists",
+                            code=ExceptionCode.USER_EXISTS,
+                        )
+                    else:
+                        raise RequestException(
+                            msg="Cannot re-register user for same address",
+                            code=ExceptionCode.BAD_REQUEST,
+                        )
             else:
                 raise RequestException(
                     msg=f"Bad request from {client_address}",
@@ -109,6 +127,15 @@ def handle_client_socket(notified_socket: socket.socket) -> None:
                 )
                 header = f"e{len(data):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
                 client_socket.send(header + data)
+
+            # Close the client socket if an given exception code is DISCONNECT
+            for key, value in clients.items():
+                if value == client_address[0]:
+                    del clients[key]
+                    break
+            else:
+                logging.debug(f"Username for IP {client_address[0]} not found")
+
             logging.log(level=logging.ERROR, msg=f"Exception: {e.msg}")
             return
     else:
@@ -119,13 +146,20 @@ def handle_client_socket(notified_socket: socket.socket) -> None:
                 # Handle request to retrieve client address
                 response_data = clients.get(request["query"].decode(ENCODING_FORMAT))
                 if response_data is not None:
-                    logging.log(
-                        level=logging.DEBUG,
-                        msg=f"Valid request: {response_data}",
-                    )
-                    data: bytes = response_data.encode(ENCODING_FORMAT)
-                    header = f"r{len(data):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
-                    notified_socket.send(header + data)
+                    # if the address is not the same as the client address
+                    if response_data != notified_socket.getpeername()[0]:
+                        logging.log(
+                            level=logging.DEBUG,
+                            msg=f"Valid request: {response_data}",
+                        )
+                        data: bytes = response_data.encode(ENCODING_FORMAT)
+                        header = f"r{len(data):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
+                        notified_socket.send(header + data)
+                    else:
+                        raise RequestException(
+                            msg="Cannot query for user having the same address",
+                            code=ExceptionCode.BAD_REQUEST,
+                        )
                 else:
                     raise RequestException(
                         msg=f"Username {request['query'].decode(ENCODING_FORMAT)} not found",
@@ -133,18 +167,56 @@ def handle_client_socket(notified_socket: socket.socket) -> None:
                     )
             elif request["type"] == "l":
                 # Handle request to lookup clients by IP address
-                lookup_addr = request["query"].decode(ENCODING_FORMAT)
-                for key, value in clients.items():
-                    if value[0] == lookup_addr:
-                        username = key.encode(ENCODING_FORMAT)
-                        header = f"l{len(username):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
-                        notified_socket.send(header + username)
-                        break
+                lookup_address = request["query"].decode(ENCODING_FORMAT)
+                if lookup_address != notified_socket.getpeername()[0]:
+                    for key, value in clients.items():
+                        if value == lookup_address:
+                            username = key.encode(ENCODING_FORMAT)
+                            header = (
+                                f"l{len(username):<{HEADER_MESSAGE_LENGTH}}".encode( ENCODING_FORMAT )
+                            )
+                            notified_socket.send(header + username)
+                            break
+                    else:
+                        raise RequestException(
+                            msg=f"Username for {lookup_address} not found",
+                            code=ExceptionCode.NOT_FOUND,
+                        )
                 else:
                     raise RequestException(
-                        msg=f"Username for {lookup_addr} not found",
-                        code=ExceptionCode.NOT_FOUND,
+                        msg="Cannot query for user having the same address",
+                        code=ExceptionCode.BAD_REQUEST,
                     )
+            # Handle registration requests from clients , 
+            elif request["type"] == "n":
+                username = request["query"].decode(ENCODING_FORMAT)
+                address = clients.get(username)
+                client_address = notified_socket.getpeername()
+                logging.debug(
+                    f"Registration request for username {username} from address {client_address}"
+                )
+                if address is None:
+                    clients[username] = client_address[0]
+                    logging.log(
+                        level=logging.DEBUG,
+                        msg=(
+                            "Accepted new connection from"
+                            f" {client_address[0]}:{client_address[1]}"
+                            f" username: {username}"
+                        ),
+                    )
+                    notified_socket.send(b"n")
+                else:
+                    if address != client_address[0]:
+                        raise RequestException(
+                            msg=f"User with username {address} already exists",
+                            code=ExceptionCode.USER_EXISTS,
+                        )
+                    else:
+                        raise RequestException(
+                            msg="Cannot re-register user for same address",
+                            code=ExceptionCode.BAD_REQUEST,
+                        )
             else:
                 raise RequestException(
                     msg=f"Bad request from {notified_socket.getpeername()}",
@@ -159,6 +231,13 @@ def handle_client_socket(notified_socket: socket.socket) -> None:
                 try:
                     active_sockets.remove(notified_socket)
                     # Remove client from clients dictionary
+                    address = notified_socket.getpeername()[0]
+                    for key, value in clients.items():
+                        if value == address:
+                            del clients[key]
+                            break
+                    else:
+                        logging.debug(f"Username for IP {address} not found")
                 except ValueError:
                     logging.info("already removed")
             else:
@@ -182,5 +261,5 @@ while True:
 
     # Handle all readable sockets
     for notified_socket in readable_sockets:
-        handle_client_socket(notified_socket)
+        handle_requests(notified_socket)
 

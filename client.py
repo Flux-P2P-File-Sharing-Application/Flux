@@ -15,14 +15,15 @@ from exceptions import RequestException, ExceptionCode
 # Constants for header lengths and formats
 HEADER_TYPE_LENGTH = 1
 HEADER_MESSAGE_LENGTH = 7
-SERVER_IP = "127.0.0.1"
+SERVER_IP = input("Enter SERVER IP: ")
 SERVER_PORT = 1234
+SERVER_ADDR = (SERVER_IP, SERVER_PORT)
 ENCODING_FORMAT = "utf-8"
 
 # Client settings
-CLIENT_IP = "127.0.0.1"
-CLIENT_SEND_PORT = 5672
-CLIENT_RECV_PORT = 4322
+CLIENT_IP = socket.gethostbyname(socket.gethostname())
+CLIENT_SEND_PORT = 5678
+CLIENT_RECV_PORT = 4328
 
 # Ensure the logs directory exists
 log_directory = "./logs"
@@ -50,9 +51,9 @@ client_recv_socket.listen(5)
 # receiving = False
 connected = [client_recv_socket]
 
-def prompt_username():
-    user_name = PromptSession("\nEnter your username: ")
-    encoded_username = user_name.prompt()
+def prompt_username()-> str:
+    user_name = input("Enter your username: ")
+    encoded_username = user_name.encode(ENCODING_FORMAT)
     username_header = f"n{len(encoded_username):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
     client_send_socket.send(username_header + encoded_username)
     response_type = client_send_socket.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
@@ -64,13 +65,13 @@ def handle_sending():
     with patch_stdout():
         recipient_prompt = PromptSession("\nEnter recipient's username: ")
         while True:
-            recipient_username = recipient_prompt.prompt()
-            if recipient_username:
+            recipient = recipient_prompt.prompt()
+            if recipient:
                 # Encode the recipient's username and prepare the header
-                encoded_recipient = recipient_username.encode(ENCODING_FORMAT)
-                request_header = f"r{len(encoded_recipient):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
-                logging.debug(f"Sent packet {(request_header + encoded_recipient).decode(ENCODING_FORMAT)}")
-                client_send_socket.send(request_header + encoded_recipient)
+                recipient = recipient.encode(ENCODING_FORMAT)
+                request_header = f"r{len(recipient):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
+                logging.debug(f"Sent packet {(request_header + recipient).decode(ENCODING_FORMAT)}")
+                client_send_socket.send(request_header + recipient)
                 
                 # Read response type
                 response_type = client_send_socket.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
@@ -82,7 +83,7 @@ def handle_sending():
                 
                 if response_type == "r":
                     # If response type is 'r', unpack the recipient address
-                    recipient_addr = response.decode(ENCODING_FORMAT)
+                    recipient_addr:str = response.decode(ENCODING_FORMAT)
                     logging.log(level=logging.DEBUG, msg=f"Response: {recipient_addr}")
                     
                     # Connect to the recipient's client socket
@@ -93,7 +94,7 @@ def handle_sending():
                     while True:
                         # Send message to the recipient
                         msg_prompt = PromptSession(
-                            f"\nEnter message for {recipient_username.encode(ENCODING_FORMAT)}: "
+                            f"\nEnter message for {recipient.decode(ENCODING_FORMAT)}: "
                         )
                         msg = msg_prompt.prompt()
                         msg = msg.encode(ENCODING_FORMAT)
@@ -135,7 +136,7 @@ def handle_receiving():
     # Read from the connected sockets
     while True:
         # socket.socket means the socket that is connected to the server
-        read_sockets= list(socket.socket)
+        read_sockets: list[socket.socket]
         # Select the sockets ready for reading
         read_sockets, _, __ = select.select(connected, [], [], 1)  
         for notified_socket in read_sockets:
@@ -203,7 +204,7 @@ def handle_receiving():
                     logging.log(level=logging.ERROR, msg=f"Exception: {e.msg}")
                     break
 
-if __name__ == "__main__":
+def main():
     while prompt_username() != "n":
         error_len = int(
             client_send_socket.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT).strip()
@@ -223,7 +224,21 @@ if __name__ == "__main__":
             sys.exit(1)
     else:
         print("Successfully registered")
+        
     send_thread = threading.Thread(target=handle_sending)
     receive_thread = threading.Thread(target=handle_receiving)
     send_thread.start()
     receive_thread.start()
+    
+    try:
+        send_thread.join()
+        receive_thread.join()
+    except KeyboardInterrupt:
+        print("Interrupt received, shutting down...")
+    finally:
+        client_send_socket.close()
+        client_recv_socket.close()
+        sys.exit(0)
+
+if __name__ == "__main__":
+    main()
