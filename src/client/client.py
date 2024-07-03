@@ -10,7 +10,7 @@ import msgpack
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import PromptSession
 
-from exceptions import RequestException, ExceptionCode
+from src.exceptions import RequestException, ExceptionCode
 
 # Constants for header lengths and formats
 HEADER_TYPE_LENGTH = 1

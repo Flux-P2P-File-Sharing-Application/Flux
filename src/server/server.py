@@ -6,7 +6,7 @@ import os
 
 import msgpack
 
-from exceptions import ExceptionCode, RequestException
+from ..exceptions import ExceptionCode, RequestException
 
 # Constants for header lengths and formats
 HEADER_TYPE_LENGTH = 1
