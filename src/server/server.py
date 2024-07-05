@@ -7,7 +7,7 @@ import os
 import msgpack
 
 from ..exceptions import ExceptionCode, RequestException
-from ..headers import HeaderCode
+from ..headers import HeaderCode, Message
 
 # Constants for header lengths and formats
 HEADER_TYPE_LENGTH = 1
@@ -46,11 +46,12 @@ server_socket.listen(5)
 
 # List of active sockets including the server socket
 active_sockets = [server_socket]
+
 # Mapping of usernames to addresses (IP, PORT)
 clients: dict[str, str] = {}
 
 # Function to receive messages from the client
-def receive_msg(client_socket: socket.socket) -> dict[str, bytes | HeaderCode]:
+def receive_msg(client_socket: socket.socket) -> Message:
     """
     Receive a message from the client socket.
     """
@@ -78,7 +79,7 @@ def receive_msg(client_socket: socket.socket) -> dict[str, bytes | HeaderCode]:
         message_len = int(client_socket.recv(HEADER_MSG_LEN).decode(FMT))
         query = client_socket.recv(message_len)
         logging.debug(
-            msg=f"Received packet: TYPE {message_type} QUERY {query} from {client_socket.getpeername()}"
+            msg=f"Received packet: TYPE {message_type} QUERY {query!r} from {client_socket.getpeername()}"
         )
         return {"type": HeaderCode(message_type), "query": query}
 
@@ -135,7 +136,7 @@ def read_handler(notified_socket: socket.socket) -> None:
         except RequestException as e:
             # Handle exceptions and send error responses
             if e.code != ExceptionCode.DISCONNECT:
-                data: bytes = msgpack.packb(
+                data = msgpack.packb(
                     e, default=RequestException.to_dict, use_bin_type=True
                 )
                 header = f"{HeaderCode.ERROR.value}{len(data):<{HEADER_MSG_LEN}}".encode(FMT)

@@ -9,6 +9,7 @@ prompt_toolkit = "*"
 
 [dev-packages]
 black = "*"
+mypy = "*"
 
 [requires]
 python_version = "3.10"

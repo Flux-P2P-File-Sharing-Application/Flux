@@ -79,12 +79,12 @@ def send_handler() -> None:
     """
     global client_send_socket
     with patch_stdout():
-        recipient_prompt = PromptSession("\nEnter recipient's username: ")
+        recipient_prompt: PromptSession = PromptSession("\nEnter recipient's username: ")
         while True:
             recipient = recipient_prompt.prompt()
             if recipient == "!exit":
                 if os.name == "nt":
-                    os._exit()
+                    os._exit(0)
                 else:
                     os.kill(os.getpid(), signal.SIGINT)
             if recipient:
@@ -102,7 +102,7 @@ def send_handler() -> None:
                     client_peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     client_peer_socket.connect((recipient_addr, CLIENT_RECV_PORT))
                     while True:
-                        msg_prompt = PromptSession(f"\nEnter message for {recipient.decode(ENCODING_FORMAT)}: ")
+                        msg_prompt: PromptSession = PromptSession(f"\nEnter message for {recipient.decode(ENCODING_FORMAT)}: ")
                         msg = msg_prompt.prompt()
                         if msg:
                             msg = msg.encode(ENCODING_FORMAT)
