@@ -6,6 +6,7 @@ name = "pypi"
 [packages]
 msgpack = "*"
 prompt_toolkit = "*"
+tqdm = "*"
 
 [dev-packages]
 black = "*"

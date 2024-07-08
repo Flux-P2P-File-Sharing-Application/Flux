@@ -12,3 +12,7 @@ class HeaderCode(Enum):
 class Message(TypedDict):
     type: HeaderCode
     query: bytes
+
+class FileMetadata(TypedDict):
+    name: str
+    size: int
