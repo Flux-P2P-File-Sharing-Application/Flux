@@ -1,13 +1,14 @@
+import logging
 import select
 import socket
-import logging
+import sqlite3
 import sys
 import os
 
 import msgpack
 
 from ..exceptions import ExceptionCode, RequestException
-from ..headers import HeaderCode, Message
+from ..headers import FileMetadata, FileSearchResult, HeaderCode, Message
 
 # Constants for header lengths and formats
 HEADER_TYPE_LENGTH = 1
@@ -49,13 +50,57 @@ active_sockets = [server_socket]
 
 # Mapping of usernames to addresses (IP, PORT)
 clients: dict[str, str] = {}
+# Mapping of IP to usernames
+ip_to_uname: dict[str, str] = {}
 
-# Function to receive messages from the client
+# Connect to the SQLite database (creates the file if it doesn't exist)
+db_connection = sqlite3.connect("files.db")
+db = db_connection.cursor()
+
+# Create table for files if it doesn't exist
+db.execute(
+    """
+    CREATE TABLE IF NOT EXISTS files (
+        uname TEXT,
+        filepath TEXT,
+        filesize INTEGER,
+        PRIMARY KEY (uname, filepath)
+    )
+    """
+)
+db.execute(
+    """
+    CREATE INDEX IF NOT EXISTS files_by_filepath ON files(filepath)
+    """
+)
+db_connection.commit()
+
+def insert_share_data(uname: str, filepath: str, filesize: int):
+    """
+    Insert shared data into the database.
+    """
+    query = """
+            INSERT INTO files(uname, filepath, filesize) VALUES (?, ?, ?)
+            """
+    args = (uname, filepath, filesize)
+    db.execute(query, args)
+    db_connection.commit()
+
+def search_files(query_string: str, self_uname: str) -> list[FileSearchResult]:
+    """
+    Search for files in the database.
+    """
+    query = """
+            SELECT uname, filepath, filesize FROM files WHERE filepath LIKE ? AND uname != ?
+            """
+    args = ("%" + query_string + "%", self_uname)
+    db.execute(query, args)
+    return db.fetchall()
+
 def receive_msg(client_socket: socket.socket) -> Message:
     """
     Receive a message from the client socket.
     """
-    # Receive message type
     message_type = client_socket.recv(HEADER_TYPE_LEN).decode(FMT)
     if not len(message_type):
         # Handle client disconnect
@@ -63,10 +108,12 @@ def receive_msg(client_socket: socket.socket) -> Message:
             msg=f"Client at {client_socket.getpeername()} closed the connection",
             code=ExceptionCode.DISCONNECT,
         )
-    elif message_type not in [
+    if message_type not in [
         HeaderCode.NEW_CONNECTION.value,
         HeaderCode.REQUEST_UNAME.value,
         HeaderCode.LOOKUP_ADDRESS.value,
+        HeaderCode.SHARE_DATA.value,
+        HeaderCode.FILE_SEARCH.value,
     ]:
         # Handle invalid message type
         logging.error(msg=f"Received message type {message_type}")
@@ -108,6 +155,7 @@ def read_handler(notified_socket: socket.socket) -> None:
                 # Check if the username is already registered
                 if address is None:
                     clients[username] = client_address[0]
+                    ip_to_uname[client_address[0]] = username
                     logging.debug(
                         msg=(
                             "Accepted new connection from"
@@ -142,13 +190,8 @@ def read_handler(notified_socket: socket.socket) -> None:
                 header = f"{HeaderCode.ERROR.value}{len(data):<{HEADER_MSG_LEN}}".encode(FMT)
                 client_socket.send(header + data)
 
-            # Close the client socket if an exception code is DISCONNECT
-            for key, value in clients.items():
-                if value == client_address[0]:
-                    del clients[key]
-                    break
-            else:
-                logging.debug(msg=f"Username for IP {client_address[0]} not found")
+            uname = ip_to_uname.pop(client_address[0], None)
+            clients.pop(uname, None)
 
             logging.error(msg=e.msg)
             return
@@ -160,10 +203,9 @@ def read_handler(notified_socket: socket.socket) -> None:
                 # Handle request to retrieve client address
                 response_data = clients.get(request["query"].decode(FMT))
                 if response_data is not None:
-                    # if the address is not the same as the client address
                     if response_data != notified_socket.getpeername()[0]:
                         logging.debug(msg=f"Valid request: {response_data}")
-                        data: bytes = response_data.encode(FMT)
+                        data = response_data.encode(FMT)
                         header = f"{HeaderCode.REQUEST_UNAME.value}{len(data):<{HEADER_MSG_LEN}}".encode(FMT)
                         notified_socket.send(header + data)
                     else:
@@ -180,12 +222,11 @@ def read_handler(notified_socket: socket.socket) -> None:
                 # Handle request to lookup clients by IP address
                 lookup_address = request["query"].decode(FMT)
                 if lookup_address != notified_socket.getpeername()[0]:
-                    for key, value in clients.items():
-                        if value == lookup_address:
-                            username = key.encode(FMT)
-                            header = f"{HeaderCode.LOOKUP_ADDRESS.value}{len(username):<{HEADER_MSG_LEN}}".encode(FMT)
-                            notified_socket.send(header + username)
-                            break
+                    username = ip_to_uname.get(lookup_address)
+                    if username is not None:
+                        username_bytes = username.encode(FMT)
+                        header = f"{HeaderCode.LOOKUP_ADDRESS.value}{len(username):<{HEADER_MSG_LEN}}".encode(FMT)
+                        notified_socket.send(header + username_bytes)
                     else:
                         raise RequestException(
                             msg=f"Username for {lookup_address} not found",
@@ -196,21 +237,21 @@ def read_handler(notified_socket: socket.socket) -> None:
                         msg="Cannot query for user having the same address",
                         code=ExceptionCode.BAD_REQUEST,
                     )
-            # Handle registration requests from clients
             elif request["type"] == HeaderCode.NEW_CONNECTION:
-                username = request["query"].decode(FMT)
-                address = clients.get(username)
+                uname = request["query"].decode(FMT)
+                address = clients.get(uname)
                 client_address = notified_socket.getpeername()
                 logging.debug(
-                    msg=f"Registration request for username {username} from address {client_address}"
+                    f"Registration request for username {uname} from address {client_address}"
                 )
                 if address is None:
-                    clients[username] = client_address[0]
+                    clients[uname] = client_address[0]
+                    ip_to_uname[client_address[0]] = uname
                     logging.debug(
                         msg=(
                             "Accepted new connection from"
                             f" {client_address[0]}:{client_address[1]}"
-                            f" username: {username}"
+                            f" username: {uname}"
                         ),
                     )
                     notified_socket.send(f"{HeaderCode.NEW_CONNECTION.value}".encode(FMT))
@@ -225,48 +266,78 @@ def read_handler(notified_socket: socket.socket) -> None:
                             msg="Cannot re-register user for same address",
                             code=ExceptionCode.BAD_REQUEST,
                         )
-            else:
-                raise RequestException(
-                    msg=f"Bad request from {notified_socket.getpeername()}",
-                    code=ExceptionCode.BAD_REQUEST,
-                )
-        except TypeError as e:
-            logging.error(msg=e)
-            sys.exit(0)
+            elif request["type"] == HeaderCode.SHARE_DATA:
+                # Handle share data request
+                share_data: list[FileMetadata] = msgpack.unpackb(request["query"])
+                username = ip_to_uname.get(notified_socket.getpeername()[0])
+                if username is not None:
+                    for file_data in share_data:
+                        insert_share_data(
+                            username, file_data["name"], file_data["size"]
+                        )
+                else:
+                    raise RequestException(
+                        msg=f"Username does not exist for address {notified_socket.getpeername()}",
+                        code=ExceptionCode.NOT_FOUND,
+                    )
+            elif request["type"] == HeaderCode.FILE_SEARCH:
+                # Handle file search request
+                query_str = request["query"].decode(FMT)
+                username = ip_to_uname.get(notified_socket.getpeername()[0])
+                if username is not None:
+                    results = search_files(query_str, username)
+                    logging.debug(msg=f"Results from DB {results}")
+                    # Map result from tuples to FileSearchResult object
+                    data = [
+                        FileSearchResult(
+                            uname=row[0], filepath=row[1], filesize=row[2]
+                        ).to_dict()
+                        for row in results
+                    ]
+                    data_bytes = msgpack.packb(data, use_bin_type=True)
+                    header = f"{HeaderCode.FILE_SEARCH.value}{len(data_bytes):<{HEADER_MSG_LEN}}".encode(FMT)
+                    notified_socket.send(header + data_bytes)
+                else:
+                    raise RequestException(
+                        msg=f"Username does not exist for address {notified_socket.getpeername()}",
+                        code=ExceptionCode.NOT_FOUND,
+                    )
         except RequestException as e:
             # Handle exceptions and send error responses
-            if e.code == ExceptionCode.DISCONNECT:
-                try:
-                    active_sockets.remove(notified_socket)
-                    # Remove client from clients dictionary
-                    address = notified_socket.getpeername()[0]
-                    for key, value in clients.items():
-                        if value == address:
-                            del clients[key]
-                            break
-                    else:
-                        logging.debug(msg=f"Username for IP {address} not found")
-                except ValueError:
-                    logging.info("already removed")
-            else:
-                data: bytes = msgpack.packb(
+            if e.code != ExceptionCode.DISCONNECT:
+                data = msgpack.packb(
                     e, default=RequestException.to_dict, use_bin_type=True
                 )
                 header = f"{HeaderCode.ERROR.value}{len(data):<{HEADER_MSG_LEN}}".encode(FMT)
                 notified_socket.send(header + data)
-            logging.error(msg=f"Exception: {e.msg}")
+            client_address = notified_socket.getpeername()
+            uname = ip_to_uname.pop(client_address[0], None)
+            clients.pop(uname, None)
+            logging.error(msg=e.msg)
             return
 
-while True:
-    # Lists to hold sockets that are ready for reading or have an error
-    readable_sockets: list[socket.socket]
-    exception_sockets: list[socket.socket]
+def main():
+    """
+    Main function to run the server.
+    """
+    logging.info(f"Server listening on {SERVER_IP}:{SERVER_PORT}")
+    try:
+        while True:
+            read_sockets, _, exception_sockets = select.select(
+                active_sockets, [], active_sockets
+            )
+            for notified_socket in read_sockets:
+                read_handler(notified_socket)
+            for notified_socket in exception_sockets:
+                # Close the socket if there's an exception
+                active_sockets.remove(notified_socket)
+                notified_socket.close()
+    except KeyboardInterrupt:
+        logging.info("Server shutting down.")
+    finally:
+        # Clean up resources on server shutdown
+        server_socket.close()
+        db_connection.close()
 
-    # Use select to wait for I/O readiness
-    readable_sockets, _, exception_sockets = select.select(
-        active_sockets, [], active_sockets
-    )
-
-    # Handle all readable sockets
-    for notified_socket in readable_sockets:
-        read_handler(notified_socket)
+if __name__ == "__main__":
+    main()
