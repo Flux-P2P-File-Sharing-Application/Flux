@@ -4,6 +4,7 @@ import re
 import select
 import signal
 import socket
+import shutil
 import threading
 import sys
 from pathlib import Path
@@ -99,275 +100,292 @@ def request_file(file_requested: FileSearchResult, client_peer_socket: socket.so
     file_recv_socket.bind((CLIENT_IP, 0))
     file_recv_socket.listen()
     file_recv_port = file_recv_socket.getsockname()[1]
-
     file_request = {"port": file_recv_port, "filepath": file_requested.filepath}
     file_req_bytes = msgpack.packb(file_request)
     file_req_header = (
         f"{HeaderCode.FILE_REQUEST.value}{len(file_req_bytes):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
     )
     client_peer_socket.send(file_req_header + file_req_bytes)
-    
-    res_type = client_peer_socket.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
-    
-    if res_type == HeaderCode.FILE_REQUEST.value:
-        sender, _ = file_recv_socket.accept()
-        logging.debug(msg=f"Sender tried to connect: {sender.getpeername()}")
-        res_type = sender.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
-        
-        if res_type == HeaderCode.FILE.value:
-            file_header_len = int(sender.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT))
-            file_header: FileMetadata = msgpack.unpackb(sender.recv(file_header_len))
-            logging.debug(msg=f"receiving file with metadata {file_header}")
-            write_path: Path = get_unique_filename(RECV_FOLDER_PATH / file_header["name"])
-            
-            try:
-                file_to_write = write_path.open("wb")
-                logging.debug(f"Creating and writing to {write_path}")
-                
-                try:
-                    byte_count = 0
-                    
-                    with tqdm.tqdm(
-                        total=file_header["size"],
-                        desc=f"Receiving {file_header['name']}",
-                        unit="B",
-                        unit_scale=True,
-                        unit_divisor=1024,
-                    ) as progress:
-                        while byte_count != file_header["size"]:
-                            file_bytes_read: bytes = sender.recv(FILE_BUFFER_LEN)
-                            byte_count += len(file_bytes_read)
-                            file_to_write.write(file_bytes_read)
-                            progress.update(len(file_bytes_read))
-                        file_to_write.close()
-                        return "Succesfully received 1 file"
-                except Exception as e:
-                    logging.error(e)
-                    return "File received but failed to save"
-            except Exception as e:
-                logging.error(e)
-                return "Unable to write file"
-        else:
-            raise RequestException(
-                f"Sender sent invalid message type in header: {res_type}",
-                ExceptionCode.INVALID_HEADER,
+
+    try:
+        res_type = client_peer_socket.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
+        if res_type == HeaderCode.FILE_REQUEST.value:
+            sender, _ = file_recv_socket.accept()
+            logging.debug(msg=f"Sender tried to connect: {sender.getpeername()}")
+            res_type = sender.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
+            if res_type == HeaderCode.FILE.value:
+                file_header_len = int(sender.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT))
+                file_header: FileMetadata = msgpack.unpackb(sender.recv(file_header_len))
+                logging.debug(msg=f"receiving file with metadata {file_header}")
+                # Check if free disk space is available
+                if shutil.disk_usage(str(RECV_FOLDER_PATH)).free > file_header["size"]:
+                    write_path: Path = get_unique_filename(RECV_FOLDER_PATH / file_header["name"])
+                    try:
+                        file_to_write = write_path.open("wb")
+                        logging.debug(f"Creating and writing to {write_path}")
+                        try:
+                            byte_count = 0
+                            with tqdm.tqdm(
+                                total=file_header["size"],
+                                desc=f"Receiving {file_header['name']}",
+                                unit="B",
+                                unit_scale=True,
+                                unit_divisor=1024,
+                            ) as progress:
+                                while byte_count != file_header["size"]:
+                                    file_bytes_read: bytes = sender.recv(FILE_BUFFER_LEN)
+                                    byte_count += len(file_bytes_read)
+                                    file_to_write.write(file_bytes_read)
+                                    progress.update(len(file_bytes_read))
+                                file_to_write.close()
+                                return "Succesfully received 1 file"
+                        except Exception as e:
+                            logging.error(e)
+                            return "File received but failed to save"
+                    except Exception as e:
+                        logging.error(e)
+                        return "Unable to write file"
+
+                else:
+                    logging.error(
+                        msg=f"Not enough space to receive file {file_header['name']}, {file_header['size']}"
+                    )
+                    return "Not enough space to receive file"
+            else:
+                raise RequestException(
+                    f"Sender sent invalid message type in header: {res_type}",
+                    ExceptionCode.INVALID_HEADER,
+                )
+
+        elif res_type == HeaderCode.ERROR.value:
+            res_len = int(client_peer_socket.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT).strip())
+            res = client_peer_socket.recv(res_len)
+            err: RequestException = msgpack.unpackb(
+                res,
+                object_hook=RequestException.from_dict,
+                raw=False,
             )
-    elif res_type == HeaderCode.ERROR.value:
-        res_len = int(client_peer_socket.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT).strip())
-        res = client_peer_socket.recv(res_len)
-        err: RequestException = msgpack.unpackb(
-            res,
-            object_hook=RequestException.from_dict,
-            raw=False,
-        )
-        raise err
-    else:
-        err = RequestException(
-            f"Invalid message type in header: {res_type}", ExceptionCode.INVALID_HEADER
-        )
-        raise err
+            raise err
+        else:
+            err = RequestException(
+                f"Invalid message type in header: {res_type}", ExceptionCode.INVALID_HEADER
+            )
+            raise err
+    except UnicodeDecodeError as e:
+        logging.error(f"UnicodeDecodeError: {e}")
+        raise RequestException("Invalid message type in header", ExceptionCode.INVALID_HEADER)
+
 
 def send_handler() -> None:
-    """
-    Handle sending messages to other clients, including file transfers.
-    """
     global client_send_socket
     with patch_stdout():
-        # Prompt for the recipient's username
-        recipient_prompt: PromptSession = PromptSession("\nEnter recipient's username: ")
+        mode_prompt: PromptSession = PromptSession(
+            "\nMODE : \n1. Search for files\n2. Send message\n3. Exit\n"
+        )
+        recipient_prompt: PromptSession = PromptSession("Enter username :")
+        search_prompt: PromptSession = PromptSession("Enter search term :")
+
         while True:
-            recipient = recipient_prompt.prompt()
-            if recipient == "!exit":
-                # Exit the program
+            mode = mode_prompt.prompt()
+            if mode == "1":
+                search_term = search_prompt.prompt()
+                search_res_list = [
+                    r"(\S+)$",
+                    r"'(.+)'$",
+                    r'"(.+)"$',
+                ]
+
+                searchquery = ""
+                for r in search_res_list:
+                    match_res = re.match(r, search_term)
+                    if match_res:
+                        searchquery = match_res.group(1)
+                        break
+                if searchquery:
+                    searchquery_bytes = searchquery.encode(ENCODING_FORMAT)
+                    search_header = f"{HeaderCode.FILE_SEARCH.value}{len(searchquery_bytes):<{HEADER_MESSAGE_LENGTH}}".encode(
+                        ENCODING_FORMAT
+                    )
+                    client_send_socket.send(search_header + searchquery_bytes)
+                    response_header_type = client_send_socket.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
+                    if response_header_type == HeaderCode.FILE_SEARCH.value:
+                        response_len = int(
+                            client_send_socket.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT).strip()
+                        )
+                        search_result_list: list[list[str | int]] = msgpack.unpackb(
+                            client_send_socket.recv(response_len),
+                            use_list=False,
+                        )
+                        search_result = [FileSearchResult(*result) for result in search_result_list]
+                        if len(search_result):
+                            for i, res in enumerate(search_result):
+                                print(f"{i+1} PATH: {res.filepath} \n\t USER: {res.uname}")
+                            file_choice_prompt: PromptSession = PromptSession("Enter choice: ")
+                            choice: str = file_choice_prompt.prompt()
+
+                            if not choice.isdigit() or not (1 <= int(choice) <= len(search_result)):
+                                continue
+
+                            file_requested = search_result[int(choice) - 1]
+                            uname_bytes = file_requested.uname.encode(ENCODING_FORMAT)
+                            request_header = f"{HeaderCode.REQUEST_UNAME.value}{len(uname_bytes):<{HEADER_MESSAGE_LENGTH}}".encode(
+                                ENCODING_FORMAT
+                            )
+                            logging.debug(
+                                msg=f"Sent packet {(request_header + uname_bytes).decode(ENCODING_FORMAT)}"
+                            )
+                            client_send_socket.send(request_header + uname_bytes)
+                            res_type = client_send_socket.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
+                            logging.debug(msg=f"Response type: {res_type}")
+                            response_length = int(
+                                client_send_socket.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT).strip()
+                            )
+                            response = client_send_socket.recv(response_length)
+
+                            if res_type == HeaderCode.REQUEST_UNAME.value:
+                                client_peer_socket = socket.socket(
+                                    socket.AF_INET, socket.SOCK_STREAM
+                                )
+                                client_peer_socket.connect((response.decode(ENCODING_FORMAT), CLIENT_RECV_PORT))
+                                req_file_thread = threading.Thread(
+                                    target=request_file,
+                                    args=(
+                                        file_requested,
+                                        client_peer_socket,
+                                    ),
+                                )
+                                req_file_thread.start()
+                            elif res_type == HeaderCode.ERROR.value:
+                                res_len = int(
+                                    client_send_socket.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT).strip()
+                                )
+                                res = client_send_socket.recv(res_len)
+                                error: RequestException = msgpack.unpackb(
+                                    res,
+                                    object_hook=RequestException.from_dict,
+                                    raw=False,
+                                )
+                                logging.error(msg=error)
+                            else:
+                                logging.error(f"Invalid message type in header: {res_type}")
+
+                        else:
+                            print("No results found")
+                    else:
+                        logging.error("Error occured while searching for files")
+
+            elif mode == "2":
+                recipient = recipient_prompt.prompt()
+                if recipient:
+                    recipient = recipient.encode(ENCODING_FORMAT)
+                    request_header = f"{HeaderCode.REQUEST_UNAME.value}{len(recipient):<{HEADER_MESSAGE_LENGTH}}".encode(
+                        ENCODING_FORMAT
+                    )
+                    logging.debug(msg=f"Sent packet {(request_header + recipient).decode(ENCODING_FORMAT)}")
+                    client_send_socket.send(request_header + recipient)
+                    res_type = client_send_socket.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
+                    logging.debug(msg=f"Response type: {res_type}")
+                    response_length = int(
+                        client_send_socket.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT).strip()
+                    )
+                    response = client_send_socket.recv(response_length)
+
+                    if res_type == HeaderCode.REQUEST_UNAME.value:
+                        recipient_addr: str = response.decode(ENCODING_FORMAT)
+                        logging.debug(msg=f"Response: {recipient_addr}")
+                        client_peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        client_peer_socket.connect((recipient_addr, CLIENT_RECV_PORT))
+                        while True:
+                            msg_prompt: PromptSession = PromptSession(
+                                f"\nEnter message for {recipient.decode(ENCODING_FORMAT)}: "
+                            )
+                            msg = msg_prompt.prompt()
+                            if len(msg):
+                                # filere = "\!send ()"
+                                msg.strip().split()
+                                send_res_list = [
+                                    r"!send (\S+)$",
+                                    r"!send '(.+)'$",
+                                    r'!send "(.+)"$',
+                                ]
+
+                                filename = ""
+                                for r in send_res_list:
+                                    match_res = re.match(r, msg)
+                                    if match_res:
+                                        filename = match_res.group(1)
+                                        break
+
+                                if filename:
+                                    filepath: Path = SHARE_FOLDER_PATH / filename
+                                    logging.debug(f"{filepath} chosen to send")
+                                    if filepath.exists() and filepath.is_file():
+                                        filemetadata: FileMetadata = {
+                                            "name": filename.split("/")[-1],
+                                            "size": filepath.stat().st_size,
+                                        }
+                                        logging.debug(filemetadata)
+                                        filemetadata_bytes = msgpack.packb(filemetadata)
+                                        logging.debug(filemetadata_bytes)
+                                        filesend_header = f"{HeaderCode.FILE.value}{len(filemetadata_bytes):<{HEADER_MESSAGE_LENGTH}}".encode(
+                                            ENCODING_FORMAT
+                                        )
+                                        try:
+                                            file_to_send = filepath.open(mode="rb")
+                                            logging.debug(
+                                                f"Sending file {filename} to {recipient.decode(ENCODING_FORMAT)}"
+                                            )
+                                            client_peer_socket.send(
+                                                filesend_header + filemetadata_bytes
+                                            )
+                                            with tqdm.tqdm(
+                                                total=filemetadata["size"],
+                                                desc=f"Sending {str(filepath)}",
+                                                unit="B",
+                                                unit_scale=True,
+                                                unit_divisor=1024,
+                                            ) as progress:
+                                                total_bytes_read = 0
+                                                while total_bytes_read != filemetadata["size"]:
+                                                    bytes_read = file_to_send.read(FILE_BUFFER_LEN)
+                                                    client_peer_socket.sendall(bytes_read)
+                                                    num_bytes = len(bytes_read)
+                                                    total_bytes_read += num_bytes
+                                                    progress.update(num_bytes)
+                                                progress.close()
+                                                print("File Sent")
+                                                file_to_send.close()
+                                        except Exception as e:
+                                            logging.error(f"File Sending failed: {e}")
+                                    else:
+                                        logging.error(f"{filepath} not found")
+                                        print(
+                                            f"Unable to perform send request, ensure that the file is available in {SHARE_FOLDER_PATH}"
+                                        )
+
+                                else:
+                                    msg = msg.encode(ENCODING_FORMAT)
+                                    if msg == b"!exit":
+                                        break
+                                    header = f"{HeaderCode.MESSAGE.value}{len(msg):<{HEADER_MESSAGE_LENGTH}}".encode(
+                                        ENCODING_FORMAT
+                                    )
+                                    client_peer_socket.send(header + msg)
+                    elif res_type == HeaderCode.ERROR.value:
+                        err: RequestException = msgpack.unpackb(
+                            response,
+                            object_hook=RequestException.from_dict,
+                            raw=False,
+                        )
+                        logging.error(msg=err)
+                    else:
+                        logging.error(f"Invalid message type in header: {res_type}")
+
+            elif mode == "3":
                 if os.name == "nt":
                     os._exit(0)
                 else:
                     os.kill(os.getpid(), signal.SIGINT)
-            if recipient:
-                # Encode recipient username and send a request for recipient's address
-                recipient = recipient.encode(ENCODING_FORMAT)
-                request_header = (
-                    f"{HeaderCode.REQUEST_UNAME.value}{len(recipient):<{HEADER_MESSAGE_LENGTH}}".encode(
-                        ENCODING_FORMAT
-                    )
-                )
-                logging.debug(msg=f"Sent packet {(request_header + recipient).decode(ENCODING_FORMAT)}")                
-                client_send_socket.send(request_header + recipient)
-                
-                # Receive and decode the response type and length
-                res_type = client_send_socket.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
-                logging.debug(msg=f"Response type: {res_type}")
-                response_length = int(client_send_socket.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT).strip())
-                response = client_send_socket.recv(response_length)
-                
-                if res_type == HeaderCode.REQUEST_UNAME.value:
-                    # Get recipient address and establish a connection
-                    recipient_addr: str = response.decode(ENCODING_FORMAT)
-                    logging.debug(msg=f"Response: {recipient_addr}")
-                    client_peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    client_peer_socket.connect((recipient_addr, CLIENT_RECV_PORT))
-                    
-                    while True:
-                        # Prompt for a message to send to the recipient
-                        msg_prompt: PromptSession = PromptSession(f"\nEnter message for {recipient.decode(ENCODING_FORMAT)}: ")
-                        msg = msg_prompt.prompt()
-                        if len(msg):
-                            msg.strip().split()
-                            send_res_list = [
-                                r"!send (\S+)$",
-                                r"!send '(.+)'$",
-                                r'!send "(.+)"$',
-                            ]
-                            search_res_list = [
-                                r"!search (\S+)$",
-                                r"!search '(.+)'$",
-                                r'!search "(.+)"$',
-                            ]
-                            filename = ""
-                            for r in send_res_list:
-                                match_res = re.match(r, msg)
-                                if match_res:
-                                    filename = match_res.group(1)
-                                    break
-                            searchquery = ""
-                            for r in search_res_list:
-                                match_res = re.match(r, msg)
-                                if match_res:
-                                    searchquery = match_res.group(1)
-                                    break
-                            if filename:
-                                filepath: Path = SHARE_FOLDER_PATH / filename
-                                logging.debug(f"{filepath} chosen to send")
-                                if filepath.exists() and filepath.is_file():
-                                    filemetadata: FileMetadata = {
-                                        "name": filename.split("/")[-1],
-                                        "size": filepath.stat().st_size,
-                                    }
-                                    logging.debug(filemetadata)
-                                    filemetadata_bytes = msgpack.packb(filemetadata)
-                                    logging.debug(filemetadata_bytes)
-                                    filesend_header = f"{HeaderCode.FILE.value}{len(filemetadata_bytes):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
-                                    try:
-                                        file_to_send = filepath.open(mode="rb")
-                                        logging.debug(f"Sending file {filename} to {recipient.decode(ENCODING_FORMAT)}")
-                                        
-                                        # Send file metadata header and file content
-                                        client_peer_socket.send(filesend_header + filemetadata_bytes)
-                                        with tqdm.tqdm(
-                                            total=filemetadata["size"],
-                                            desc=f"Sending {str(filepath)}",
-                                            unit="B",
-                                            unit_scale=True,
-                                            unit_divisor=1024,
-                                        ) as progress:
-                                            total_bytes_read = 0
-                                            while total_bytes_read != filemetadata["size"]:
-                                                bytes_read = file_to_send.read(FILE_BUFFER_LEN)
-                                                client_peer_socket.sendall(bytes_read)
-                                                num_bytes = len(bytes_read)
-                                                total_bytes_read += num_bytes
-                                                progress.update(num_bytes)
-                                            progress.close()
-                                            print("File Sent")
-                                            file_to_send.close()
-                                    except Exception as e:
-                                        logging.error(f"File Sending failed: {e}")
-                                else:
-                                    logging.error(f"{filepath} not found")
-                                    print(f"Unable to perform send request, ensure that the file is available in {SHARE_FOLDER_PATH}")
-                            elif searchquery:
-                                searchquery_bytes = searchquery.encode(ENCODING_FORMAT)
-                                search_header = f"{HeaderCode.FILE_SEARCH.value}{len(searchquery_bytes):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
-                                client_send_socket.send(
-                                    search_header + searchquery_bytes
-                                )
-                                response_header_type = client_send_socket.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
-                                if (
-                                    response_header_type
-                                    == HeaderCode.FILE_SEARCH.value
-                                ):
-                                    response_len = int(
-                                        client_send_socket.recv(HEADER_MESSAGE_LENGTH)
-                                        .decode(ENCODING_FORMAT)
-                                        .strip()
-                                    )
-                                    search_result_list: list[list[str | int]] = msgpack.unpackb(
-                                        client_send_socket.recv(response_len),
-                                        use_list=False,
-                                    )
-                                    search_result = [
-                                        FileSearchResult(*result) for result in search_result_list
-                                    ]
-                                    for i, res in enumerate(search_result):
-                                        print(f"{i+1} PATH: {res.filepath} \n\t USER: {res.uname}")
-                                    file_choice_prompt: PromptSession = PromptSession(
-                                        "Enter choice: "
-                                    )
-                                    choice: str = file_choice_prompt.prompt()
-
-                                    if not choice.isdigit() or not (
-                                        1 <= int(choice) <= len(search_result)
-                                    ):
-                                        continue
-
-                                    file_requested = search_result[int(choice) - 1]
-                                    uname_bytes = file_requested.uname.encode(ENCODING_FORMAT)
-                                    request_header = f"{HeaderCode.REQUEST_UNAME.value}{len(uname_bytes):<{HEADER_MESSAGE_LENGTH}}".encode(
-                                        ENCODING_FORMAT
-                                    )
-                                    logging.debug(
-                                        msg=f"Sent packet {(request_header + uname_bytes).decode(ENCODING_FORMAT)}"
-                                    )
-                                    client_send_socket.send(request_header + uname_bytes)
-                                    res_type = client_send_socket.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
-                                    logging.debug(msg=f"Response type: {res_type}")
-                                    response_length = int(
-                                        client_send_socket.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT).strip()
-                                    )
-                                    response = client_send_socket.recv(response_length)
-                                    if res_type == HeaderCode.REQUEST_UNAME.value:
-                                        req_file_thread = threading.Thread(
-                                            target=request_file,
-                                            args=(
-                                                file_requested,
-                                                client_peer_socket,
-                                            ),
-                                        )
-                                        req_file_thread.start()
-                                    elif res_type == HeaderCode.ERROR.value:
-                                        res_len = int(
-                                            client_send_socket.recv(HEADER_MESSAGE_LENGTH)
-                                            .decode(ENCODING_FORMAT)
-                                            .strip()
-                                        )
-                                        res = client_send_socket.recv(res_len)
-                                        error: RequestException = msgpack.unpackb(
-                                            res,
-                                            object_hook=RequestException.from_dict,
-                                            raw=False,
-                                        )
-                                        logging.error(msg=error)
-                                    else:
-                                        logging.error(f"Invalid message type in header: {res_type}")
-                                else:
-                                    logging.error("Error occured while searching for files")
-                            else:
-                                # Send a text message
-                                msg = msg.encode(ENCODING_FORMAT)
-                                if msg == b"!exit":
-                                    break
-                                header = f"{HeaderCode.MESSAGE.value}{len(msg):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
-                                client_peer_socket.send(header + msg)
-                elif res_type == HeaderCode.ERROR.value:
-                    # Handle errors
-                    err: RequestException = msgpack.unpackb(
-                        response, 
-                        object_hook=RequestException.from_dict, 
-                        raw=False
-                    )
-                    logging.error(msg=err)
-                else:
-                    logging.error(f"Invalid message type in header: {res_type}")
 
 def send_file(filepath: Path, requester: tuple[str, int]):
     file_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -408,7 +426,6 @@ def send_file(filepath: Path, requester: tuple[str, int]):
             file_send_socket.close()
     except Exception as e:
         logging.error(f"File Sending failed: {e}")
-
 
 def get_unique_filename(path: Path) -> Path:
     """
@@ -490,6 +507,7 @@ def receive_msg(socket: socket.socket) -> str:
             file_req_header: FileRequest = msgpack.unpackb(socket.recv(req_header_len))
             logging.debug(msg=f"Received request: {file_req_header}")
             requested_file_path = Path(file_req_header["filepath"])
+            # TODO: Check if file is in share folder
             if requested_file_path.is_file():
                 socket.send(HeaderCode.FILE_REQUEST.value.encode(ENCODING_FORMAT))
                 send_file_thread = threading.Thread(
@@ -499,6 +517,7 @@ def receive_msg(socket: socket.socket) -> str:
                 send_file_thread.start()
                 return "File requested by user"
             else:
+                # TODO: Update file info on server
                 raise RequestException(
                     f"Requested file {file_req_header['filepath']} is not available",
                     ExceptionCode.NOT_FOUND,
