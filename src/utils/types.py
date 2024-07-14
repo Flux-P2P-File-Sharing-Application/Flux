@@ -20,10 +20,12 @@ class Message(TypedDict):
 class FileMetadata(TypedDict):
     name: str
     size: int
+    hash: str
 
 class FileRequest(TypedDict):
     filepath: str
     port: int
+    hash: str
     
 class FileSearchResult(NamedTuple):
     uname: str
