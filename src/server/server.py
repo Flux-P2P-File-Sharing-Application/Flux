@@ -18,11 +18,17 @@ from utils.types import DBData, DirData, HeaderCode, Message, UpdateHashParams
 
 IP = socket.gethostbyname(socket.gethostname())
 
-# Ensure the logs directory exists
-log_directory = "./logs"
-os.makedirs(log_directory, exist_ok=True)
+# Ensure the necessary directories exist
+project_root = Path(__file__).resolve().parents[2]
+log_directory = project_root / "logs"
+downloads_directory = project_root / "downloads"
+tmp_directory = project_root / "tmp"
+db_directory = project_root / "db"
 
-log_filename = os.path.join(log_directory, f"server_{IP}.log")
+for directory in [log_directory, downloads_directory, tmp_directory, db_directory]:
+    directory.mkdir(parents=True, exist_ok=True)
+
+log_filename = log_directory / f"server_{IP}.log"
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -33,11 +39,7 @@ logging.basicConfig(
 )
 
 # Construct a relative path for the database
-project_root = Path(__file__).resolve().parents[2]
-db_path = project_root / "db" / "db.json"
-
-# Ensure the database directory exists
-db_path.parent.mkdir(parents=True, exist_ok=True)
+db_path = db_directory / "db.json"
 
 flux_db = TinyDB(db_path)
 

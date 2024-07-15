@@ -8,11 +8,12 @@ import shutil
 import hashlib
 import threading
 import sys
+import msgpack
+import tqdm
+
 from pathlib import Path
 from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
 
-import msgpack
-import tqdm
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import PromptSession
 
@@ -29,31 +30,45 @@ from utils.constants import (
     RECV_FOLDER_PATH,
     SERVER_RECV_PORT,
     SHARE_FOLDER_PATH,
+    TEMP_FOLDER_PATH,
 )
 from utils.exceptions import ExceptionCode, RequestException
 from utils.helpers import (
     display_share_dict,
     find_file,
     get_file_hash,
-    get_unique_filename,
     get_files_in_dir,
+    get_pending_downloads,
+    get_unique_filename,
     path_to_dict,
 )
-from utils.types import DBData, DirData, FileMetadata, FileRequest, HeaderCode, UpdateHashParams
+from utils.socket_functions import request_ip
+from utils.types import (
+    CompressionMethod,
+    DBData,
+    DirData,
+    FileMetadata,
+    FileRequest,
+    HeaderCode,
+    TransferProgress,
+    TransferStatus,
+    UpdateHashParams,
+)
 
+# Set the client's IP and server's IP, address
 CLIENT_IP = socket.gethostbyname(socket.gethostname())
 SERVER_IP = input("Enter SERVER IP: ")
 SERVER_ADDR = (SERVER_IP, SERVER_RECV_PORT)
 
 # Ensure the necessary directories exist
-log_directory = Path("./logs")
-log_directory.mkdir(parents=True, exist_ok=True)
-SHARE_FOLDER_PATH.mkdir(parents=True, exist_ok=True)
-RECV_FOLDER_PATH.mkdir(parents=True, exist_ok=True)
+project_root = Path(__file__).resolve().parents[2]
+log_directory = project_root / "logs"
+share_directory = project_root / "share"
+recv_directory = project_root / "downloads"
+sub_directory = share_directory / "sub"
 
-# Create the ../share/sub directory
-sub_directory = Path("./share/sub")
-sub_directory.mkdir(parents=True, exist_ok=True)
+for directory in [log_directory, share_directory, recv_directory, sub_directory]:
+    directory.mkdir(parents=True, exist_ok=True)
 
 # Configure logging
 log_filename = log_directory / f"client_{CLIENT_IP}.log"
@@ -74,6 +89,7 @@ client_recv_socket.bind((CLIENT_IP, CLIENT_RECV_PORT))
 client_send_socket.connect((SERVER_IP, SERVER_RECV_PORT))
 client_recv_socket.listen(5)
 connected = [client_recv_socket]
+transfer_progress: dict[Path, TransferProgress] = {}
 
 def prompt_username() -> str:
     my_username = input("Enter username: ")
@@ -86,19 +102,28 @@ def prompt_username() -> str:
     return type
 
 
-def request_file(file_requested: DirData, client_peer_socket: socket.socket) -> str:
+def request_file(file_requested: DirData, uname: str, client_peer_socket: socket.socket) -> str:
+    global transfer_progress
     file_recv_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     file_recv_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    # file_recv_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_CORK, 0)
+    file_recv_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_CORK, 0)
     file_recv_socket.bind((CLIENT_IP, 0))
     file_recv_socket.listen()
     file_recv_port = file_recv_socket.getsockname()[1]
 
+    offset = 0
+    temp_path: Path = TEMP_FOLDER_PATH.joinpath(uname + "/" + file_requested["path"])
+    logging.debug(f"Using temp path {str(temp_path)}")
+    if temp_path.exists():
+        offset = temp_path.stat().st_size
+
+    logging.debug(f"Offset of {offset} bytes")
     request_hash = file_requested["hash"] is None
     file_request: FileRequest = {
         "port": file_recv_port,
         "filepath": file_requested["path"],
         "request_hash": request_hash,
+        "resume_offset": offset,
     }
 
     file_req_bytes = msgpack.packb(file_request)
@@ -106,8 +131,10 @@ def request_file(file_requested: DirData, client_peer_socket: socket.socket) -> 
         f"{HeaderCode.FILE_REQUEST.value}{len(file_req_bytes):<{HEADER_MSG_LEN}}".encode(FMT)
     )
     client_peer_socket.send(file_req_header + file_req_bytes)
+
     try:
         res_type = client_peer_socket.recv(HEADER_TYPE_LEN).decode(FMT)
+        logging.debug(f"received header type {res_type} from sender")
         match res_type:
             case HeaderCode.FILE_REQUEST.value:
                 sender, _ = file_recv_socket.accept()
@@ -119,28 +146,41 @@ def request_file(file_requested: DirData, client_peer_socket: socket.socket) -> 
                     logging.debug(msg=f"receiving file with metadata {file_header}")
                     # Check if free disk space is available
                     if shutil.disk_usage(str(RECV_FOLDER_PATH)).free > file_header["size"]:
-                        write_path: Path = get_unique_filename(
-                            RECV_FOLDER_PATH / file_header["name"]
+                        final_download_path: Path = get_unique_filename(
+                            RECV_FOLDER_PATH / file_header["path"]
                         )
                         try:
-                            write_path.parent.mkdir(parents=True, exist_ok=True)
-                            file_to_write = write_path.open("wb")
-                            logging.debug(f"Creating and writing to {write_path}")
+                            temp_path.parent.mkdir(parents=True, exist_ok=True)
+                            file_to_write = temp_path.open("ab")
+                            transfer_progress[temp_path] = {}
+                            logging.debug(f"Creating and writing to {temp_path}")
                             try:
                                 byte_count = 0
                                 hash = hashlib.sha1()
                                 with tqdm.tqdm(
-                                    total=file_header["size"],
-                                    desc=f"Receiving {file_header['name']}",
+                                    total=file_header["size"] - offset,
+                                    desc=f"Receiving {file_header['path']}",
                                     unit="B",
                                     unit_scale=True,
                                     unit_divisor=1024,
                                 ) as progress:
+                                    transfer_progress[temp_path][
+                                        "status"
+                                    ] = TransferStatus.DOWNLOADING
                                     while True:
+                                        if (
+                                            transfer_progress[temp_path]["status"]
+                                            == TransferStatus.PAUSED
+                                        ):
+                                            file_to_write.close()
+                                            file_recv_socket.close()
+                                            return f"Download for file {file_header['path']} was paused"
                                         file_bytes_read: bytes = sender.recv(FILE_BUFFER_LEN)
-                                        hash.update(file_bytes_read)
+                                        if not offset:
+                                            hash.update(file_bytes_read)
                                         num_bytes_read = len(file_bytes_read)
                                         byte_count += num_bytes_read
+                                        transfer_progress[temp_path]["progress"] = byte_count
                                         file_to_write.write(file_bytes_read)
                                         progress.update(num_bytes_read)
                                         logging.debug(
@@ -148,26 +188,40 @@ def request_file(file_requested: DirData, client_peer_socket: socket.socket) -> 
                                         )
                                         if num_bytes_read == 0:
                                             break
+
+                                    hash_str = ""
+                                    if offset:
+                                        file_to_write.seek(0)
+                                        hash_str = get_file_hash(str(temp_path))
                                     file_to_write.close()
-                                    received_hash = hash.hexdigest()
+
+                                    received_hash = hash.hexdigest() if not offset else hash_str
                                     if (request_hash and received_hash == file_header["hash"]) or (
                                         received_hash == file_requested["hash"]
                                     ):
+                                        transfer_progress[temp_path][
+                                            "status"
+                                        ] = TransferStatus.COMPLETED
+                                        final_download_path.parent.mkdir(
+                                            parents=True, exist_ok=True
+                                        )
+                                        shutil.move(temp_path, final_download_path)
                                         return "Succesfully received 1 file"
                                     else:
+                                        transfer_progress[temp_path] = TransferStatus.FAILED
                                         logging.error(
-                                            msg=f"Failed integrity check for file {file_header['name']}"
+                                            msg=f"Failed integrity check for file {file_header['path']}"
                                         )
                                         return "Integrity check failed"
                             except Exception as e:
-                                logging.error(e)
+                                logging.error(e, exc_info=True)
                                 return "File received but failed to save"
                         except Exception as e:
-                            logging.error(e)
+                            logging.error(e, exc_info=True)
                             return "Unable to write file"
                     else:
                         logging.error(
-                            msg=f"Not enough space to receive file {file_header['name']}, {file_header['size']}"
+                            msg=f"Not enough space to receive file {file_header['path']}, {file_header['size']}"
                         )
                         return "Not enough space to receive file"
                 else:
@@ -193,14 +247,18 @@ def request_file(file_requested: DirData, client_peer_socket: socket.socket) -> 
     except UnicodeDecodeError as e:
         logging.error(f"UnicodeDecodeError: {e}")
         raise RequestException("Invalid message type in header", ExceptionCode.INVALID_HEADER)
+    except Exception as e:
+        logging.error(e)
+        raise e
+
+
 def send_handler() -> None:
     global client_send_socket
     with patch_stdout():
         mode_prompt: PromptSession = PromptSession(
-            "\nMODE : \n1. Browse files\n2. Send message\n3. Exit\n"
+            "\nMODE : \n1. Browse files\n2. Send message\n3. Pause/resume downloads\n4. Exit\n"
         )
         recipient_prompt: PromptSession = PromptSession("Enter username :")
-        search_prompt: PromptSession = PromptSession("Enter search term :")
         while True:
             mode = mode_prompt.prompt()
             match mode:
@@ -227,11 +285,11 @@ def send_handler() -> None:
                     client_send_socket.send(search_header + searchquery_bytes)
                     response_header_type = client_send_socket.recv(HEADER_TYPE_LEN).decode(FMT)
                     if response_header_type == HeaderCode.FILE_SEARCH.value:
-                        response_length = int(
+                        response_len = int(
                             client_send_socket.recv(HEADER_MSG_LEN).decode(FMT).strip()
                         )
                         browse_files: list[DBData] = msgpack.unpackb(
-                            client_send_socket.recv(response_length),
+                            client_send_socket.recv(response_len),
                         )
                         # search_result = [
                         #     FileSearchResult(*result) for result in browse_files
@@ -267,64 +325,31 @@ def send_handler() -> None:
                                 print("File path not found")
                                 continue
 
-                            uname_bytes = selected_user["uname"].encode(FMT)
-                            request_header = f"{HeaderCode.REQUEST_IP.value}{len(uname_bytes):<{HEADER_MSG_LEN}}".encode(
-                                FMT
-                            )
-                            logging.debug(
-                                msg=f"Sent packet {(request_header + uname_bytes).decode(FMT)}"
-                            )
-                            client_send_socket.send(request_header + uname_bytes)
-                            res_type = client_send_socket.recv(HEADER_TYPE_LEN).decode(FMT)
-                            logging.debug(msg=f"Response type: {res_type}")
-                            response_length= int(
-                                client_send_socket.recv(HEADER_MSG_LEN).decode(FMT).strip()
-                            )
-                            peer_ip_bytes: bytes = client_send_socket.recv(response_length)
+                            peer_ip = request_ip(selected_user["uname"], client_send_socket)
 
-                            if res_type == HeaderCode.REQUEST_IP.value:
-                                peer_ip: str = peer_ip_bytes.decode(FMT)
-
-                                with ThreadPoolExecutor() as executor:
-                                    if file_item["type"] == "file":
-                                        executor.submit(
-                                            req_file_worker,
-                                            file_item,
-                                            peer_ip,
-                                        )
-                                        # req_file_thread = threading.Thread(
-                                        #     target=req_file_worker,
-                                        #     args=(
-                                        #         file_item,
-                                        #         peer_ip,
-                                        #     ),
-                                        # )
-                                        # req_file_thread.start()
-                                    else:
-                                        files_to_request: list[DirData] = []
-                                        get_files_in_dir(
-                                            file_item["children"],
-                                            files_to_request,
-                                        )
-                                        futures = executor.map(
-                                            req_file_worker,
-                                            files_to_request,
-                                            [peer_ip] * len(files_to_request),
-                                        )
-                            elif res_type == HeaderCode.ERROR.value:
-                                res_len = int(
-                                    client_send_socket.recv(HEADER_MSG_LEN).decode(FMT).strip()
-                                )
-                                res = client_send_socket.recv(res_len)
-                                error: RequestException = msgpack.unpackb(
-                                    res,
-                                    object_hook=RequestException.from_dict,
-                                    raw=False,
-                                )
-                                logging.error(msg=error)
+                            if peer_ip is not None:
+                                executor = ThreadPoolExecutor()
+                                if file_item["type"] == "file":
+                                    executor.submit(
+                                        req_file_worker,
+                                        file_item,
+                                        selected_user["uname"],
+                                        peer_ip,
+                                    )
+                                else:
+                                    files_to_request: list[DirData] = []
+                                    get_files_in_dir(
+                                        file_item["children"],
+                                        files_to_request,
+                                    )
+                                    executor.map(
+                                        req_file_worker,
+                                        files_to_request,
+                                        [selected_user["uname"]] * len(files_to_request),
+                                        [peer_ip] * len(files_to_request),
+                                    )
                             else:
-                                logging.error(f"Invalid message type in header: {res_type}")
-
+                                print(f"No user found with username {selected_user['uname']}")
                         else:
                             print("No results found")
                     else:
@@ -356,25 +381,26 @@ def send_handler() -> None:
                                 )
                                 msg = msg_prompt.prompt()
                                 if len(msg):
-                                    # filere = "\!send ()"
                                     msg.strip().split()
                                     send_res_list = [
                                         r"!send (\S+)$",
                                         r"!send '(.+)'$",
                                         r'!send "(.+)"$',
                                     ]
+
                                     filename = ""
                                     for r in send_res_list:
                                         match_res = re.match(r, msg)
                                         if match_res:
                                             filename = match_res.group(1)
                                             break
+
                                     if filename:
                                         filepath: Path = SHARE_FOLDER_PATH / filename
                                         logging.debug(f"{filepath} chosen to send")
                                         if filepath.exists() and filepath.is_file():
                                             filemetadata: FileMetadata = {
-                                                "name": filename.split("/")[-1],
+                                                "path": filename.split("/")[-1],
                                                 "size": filepath.stat().st_size,
                                             }
                                             logging.debug(filemetadata)
@@ -435,10 +461,90 @@ def send_handler() -> None:
                         else:
                             logging.error(f"Invalid message type in header: {res_type}")
                 case "3":
+                    logging.debug(transfer_progress)
+                    transfer_progress_prompt = PromptSession(
+                        get_pending_downloads(transfer_progress)
+                        + "\nEnter file path to toggle download status: "
+                    )
+                    relative_path: str = transfer_progress_prompt.prompt()
+                    if relative_path:
+                        path = TEMP_FOLDER_PATH / relative_path
+                        executor = ThreadPoolExecutor()
+                        if path.is_file():
+                            if path in transfer_progress:
+                                if transfer_progress[path]["status"] == TransferStatus.DOWNLOADING:
+                                    transfer_progress[path]["status"] = TransferStatus.PAUSED
+                                    print(f"Paused transfer for file {str(path)}")
+                                elif transfer_progress[path]["status"] == TransferStatus.PAUSED:
+                                    uname = (
+                                        str(path).removeprefix(str(TEMP_FOLDER_PATH)).split("/")[1]
+                                    )
+                                    peer_ip = request_ip(uname, client_send_socket)
+                                    file_item: DirData = {
+                                        "name": path.name,
+                                        "path": relative_path.removeprefix(uname + "/"),
+                                        "type": "file",
+                                        "size": 0,
+                                        "hash": None,
+                                        "compression": CompressionMethod.NONE,
+                                        "children": None,
+                                    }
+                                    if peer_ip is not None:
+                                        executor = ThreadPoolExecutor()
+                                        executor.submit(
+                                            req_file_worker,
+                                            file_item,
+                                            uname,
+                                            peer_ip,
+                                        )
+                                    else:
+                                        print(f"User with username {uname} not found")
+                                else:
+                                    print(f"Download status for file {str(path)} cannot be changed")
+                            else:
+                                print("Could not retrieve file transfer status")
+                        elif path.is_dir():
+                            uname = str(path).removeprefix(str(TEMP_FOLDER_PATH)).split("/")[1]
+                            peer_ip = request_ip(uname, client_send_socket)
+                            if peer_ip is not None:
+                                paused_dir_files: list[DirData] = []
+                                for pathname, progress in transfer_progress.items():
+                                    if path in pathname.parents:
+                                        if progress["status"] == TransferStatus.PAUSED:
+                                            paused_dir_files.append(
+                                                {
+                                                    "name": pathname.name,
+                                                    "path": str(
+                                                        pathname.relative_to(
+                                                            TEMP_FOLDER_PATH / uname
+                                                        )
+                                                    ),
+                                                    "type": "file",
+                                                    "size": 0,
+                                                    "hash": None,
+                                                    "compression": CompressionMethod.NONE,
+                                                    "children": None,
+                                                }
+                                            )
+                                        elif progress["status"] == TransferStatus.DOWNLOADING:
+                                            transfer_progress[pathname][
+                                                "status"
+                                            ] = TransferStatus.PAUSED
+                                            print(f"Paused transfer for file {str(pathname)}")
+                                executor.map(
+                                    req_file_worker,
+                                    paused_dir_files,
+                                    [uname] * len(paused_dir_files),
+                                    [peer_ip] * len(paused_dir_files),
+                                )
+                        else:
+                            print("File does not exist")
+                case "4":
                     if os.name == "nt":
                         os._exit(0)
                     else:
                         os.kill(os.getpid(), signal.SIGINT)
+
 
 def req_file_thread_target(file_item, peer_ip):
     try:
@@ -454,26 +560,26 @@ def req_file_thread_target(file_item, peer_ip):
                 [peer_ip] * len(files_to_request),
             )
             wait(futures, return_when=ALL_COMPLETED)
-            # executor.shutdown(wait=True)
-            # for file in files_to_request:
-            #     executor.submit(req_file_worker, file, peer_ip)
     except Exception as e:
         logging.error(e.with_traceback(e.__traceback__))
 
 
-def req_file_worker(file_item: DirData, peer_ip: str):
+def req_file_worker(file_item: DirData, uname: str, peer_ip: str):
     client_peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client_peer_socket.connect((peer_ip, CLIENT_RECV_PORT))
-    request_file(file_item, client_peer_socket)
+    request_file(file_item, uname, client_peer_socket)
 
 
-def send_file(filepath: Path, requester: tuple[str, int], request_hash: bool) -> None:
+def send_file(
+    filepath: Path, requester: tuple[str, int], request_hash: bool, resume_offset: int
+) -> None:
     file_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     file_send_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    # file_send_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_CORK, 0)
+    file_send_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_CORK, 0)
     file_send_socket.connect(requester)
     hash = ""
     # compression = CompressionMethod.NONE
+
     # file_size = filepath.stat().st_size
     # if file_size < COMPRESSION_THRESHOLD:
     #     compression = CompressionMethod.ZSTD
@@ -485,30 +591,34 @@ def send_file(filepath: Path, requester: tuple[str, int], request_hash: bool) ->
         hash = get_file_hash(str(filepath))
 
     filemetadata: FileMetadata = {
-        "name": str(filepath).removeprefix(str(SHARE_FOLDER_PATH) + "/"),
+        "path": str(filepath).removeprefix(str(SHARE_FOLDER_PATH) + "/"),
         "size": filepath.stat().st_size,
         "hash": hash if request_hash else None,
         # "compression": compression,
     }
+
     logging.debug(filemetadata)
     filemetadata_bytes = msgpack.packb(filemetadata)
     logging.debug(filemetadata_bytes)
     filesend_header = f"{HeaderCode.FILE.value}{len(filemetadata_bytes):<{HEADER_MSG_LEN}}".encode(
         FMT
     )
+
     try:
         file_to_send = filepath.open(mode="rb")
-        logging.debug(f"Sending file {filemetadata['name']} to {requester}")
+        logging.debug(f"Sending file {filemetadata['path']} to {requester}")
         file_send_socket.send(filesend_header + filemetadata_bytes)
         with tqdm.tqdm(
-            total=filemetadata["size"],
+            total=filemetadata["size"] - resume_offset,
             desc=f"Sending {str(filepath)}",
             unit="B",
             unit_scale=True,
             unit_divisor=1024,
         ) as progress:
             total_bytes_read = 0
-            while total_bytes_read != filemetadata["size"]:
+            file_to_send.seek(resume_offset)
+            while total_bytes_read != filemetadata["size"] - resume_offset:
+                # time.sleep(0.01)
                 bytes_read = file_to_send.read(FILE_BUFFER_LEN)
                 num_bytes = file_send_socket.send(bytes_read)
                 total_bytes_read += num_bytes
@@ -534,6 +644,8 @@ def send_file(filepath: Path, requester: tuple[str, int], request_hash: bool) ->
             client_send_socket.send(update_hash_header + update_hash_bytes)
     except Exception as e:
         logging.error(f"File Sending failed: {e}")
+
+
 def receive_msg(socket: socket.socket) -> str:
     logging.debug(f"Receiving from {socket.getpeername()}")
     message_type = socket.recv(HEADER_TYPE_LEN).decode(FMT)
@@ -557,7 +669,7 @@ def receive_msg(socket: socket.socket) -> str:
                 file_header_len = int(socket.recv(HEADER_MSG_LEN).decode(FMT))
                 file_header: FileMetadata = msgpack.unpackb(socket.recv(file_header_len))
                 logging.debug(msg=f"receiving file with metadata {file_header}")
-                write_path: Path = get_unique_filename(RECV_FOLDER_PATH / file_header["name"])
+                write_path: Path = get_unique_filename(RECV_FOLDER_PATH / file_header["path"])
                 try:
                     file_to_write = open(str(write_path), "wb")
                     logging.debug(f"Creating and writing to {write_path}")
@@ -565,7 +677,7 @@ def receive_msg(socket: socket.socket) -> str:
                         byte_count = 0
                         with tqdm.tqdm(
                             total=file_header["size"],
-                            desc=f"Receiving {file_header['name']}",
+                            desc=f"Receiving {file_header['path']}",
                             unit="B",
                             unit_scale=True,
                             unit_divisor=1024,
@@ -596,6 +708,7 @@ def receive_msg(socket: socket.socket) -> str:
                             requested_file_path,
                             (socket.getpeername()[0], file_req_header["port"]),
                             file_req_header["request_hash"],
+                            file_req_header["resume_offset"],
                         ),
                     )
                     send_file_thread.start()
@@ -609,10 +722,13 @@ def receive_msg(socket: socket.socket) -> str:
             case _:
                 message_len = int(socket.recv(HEADER_MSG_LEN).decode(FMT))
                 return socket.recv(message_len).decode(FMT)
+
+
 def receive_handler() -> None:
     global client_send_socket
     global client_recv_socket
     peers: dict[str, str] = {}
+
     while True:
         read_sockets: list[socket.socket]
         read_sockets, _, __ = select.select(connected, [], [], 1)
@@ -620,7 +736,7 @@ def receive_handler() -> None:
             if notified_socket == client_recv_socket:
                 peer_socket, peer_addr = client_recv_socket.accept()
                 logging.debug(
-                    msg=("Accepted new connection from" f" {peer_addr[0]}:{peer_addr[1]}"),
+                    msg=f"Accepted new connection from {peer_addr[0]}:{peer_addr[1]}",
                 )
                 try:
                     connected.append(peer_socket)
@@ -674,9 +790,13 @@ def receive_handler() -> None:
                             logging.info("already removed")
                     logging.error(msg=f"Exception: {e.msg}")
                     break
+
+
 def excepthook(args: threading.ExceptHookArgs) -> None:
     logging.fatal(msg=args)
     logging.fatal(msg=args.exc_traceback)
+
+
 if __name__ == "__main__":
     try:
         while prompt_username() != HeaderCode.NEW_CONNECTION.value:
@@ -694,21 +814,19 @@ if __name__ == "__main__":
                 client_send_socket.close()
                 client_recv_socket.close()
                 sys.exit(1)
-
         print("Successfully registered")
         share_data = msgpack.packb(path_to_dict(SHARE_FOLDER_PATH)["children"])
         share_data_header = (
             f"{HeaderCode.SHARE_DATA.value}{len(share_data):<{HEADER_MSG_LEN}}".encode(FMT)
         )
         client_send_socket.sendall(share_data_header + share_data)
+
         threading.excepthook = excepthook
         send_thread = threading.Thread(target=send_handler)
         receive_thread = threading.Thread(target=receive_handler)
         send_thread.start()
         receive_thread.start()
         send_thread.join()
-        receive_thread.join()
-
     except (KeyboardInterrupt, EOFError, SystemExit):
         sys.exit(0)
     except:
