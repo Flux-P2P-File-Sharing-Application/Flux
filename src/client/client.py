@@ -10,9 +10,12 @@ import threading
 import sys
 import msgpack
 import tqdm
+import pickle
 
 from pathlib import Path
-from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
+
+from pprint import pformat
 
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import PromptSession
@@ -38,6 +41,7 @@ from utils.helpers import (
     find_file,
     get_file_hash,
     get_files_in_dir,
+    generate_transfer_progress,
     get_pending_downloads,
     get_unique_filename,
     path_to_dict,
@@ -91,7 +95,10 @@ client_recv_socket.listen(5)
 connected = [client_recv_socket]
 transfer_progress: dict[Path, TransferProgress] = {}
 
+my_username = ""
+
 def prompt_username() -> str:
+    global my_username
     my_username = input("Enter username: ")
     username = my_username.encode(FMT)
     username_header = f"{HeaderCode.NEW_CONNECTION.value}{len(username):<{HEADER_MSG_LEN}}".encode(
@@ -508,7 +515,10 @@ def send_handler() -> None:
                             peer_ip = request_ip(uname, client_send_socket)
                             if peer_ip is not None:
                                 paused_dir_files: list[DirData] = []
-                                for pathname, progress in transfer_progress.items():
+                                for (
+                                    pathname,
+                                    progress,
+                                ) in transfer_progress.items():
                                     if path in pathname.parents:
                                         if progress["status"] == TransferStatus.PAUSED:
                                             paused_dir_files.append(
@@ -559,7 +569,7 @@ def req_file_thread_target(file_item, peer_ip):
                 files_to_request,
                 [peer_ip] * len(files_to_request),
             )
-            wait(futures, return_when=ALL_COMPLETED)
+            # wait(futures, return_when=ALL_COMPLETED)
     except Exception as e:
         logging.error(e.with_traceback(e.__traceback__))
 
@@ -571,7 +581,10 @@ def req_file_worker(file_item: DirData, uname: str, peer_ip: str):
 
 
 def send_file(
-    filepath: Path, requester: tuple[str, int], request_hash: bool, resume_offset: int
+    filepath: Path,
+    requester: tuple[str, int],
+    request_hash: bool,
+    resume_offset: int,
 ) -> None:
     file_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     file_send_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -618,7 +631,7 @@ def send_file(
             total_bytes_read = 0
             file_to_send.seek(resume_offset)
             while total_bytes_read != filemetadata["size"] - resume_offset:
-                # time.sleep(0.01)
+                time.sleep(0.05)
                 bytes_read = file_to_send.read(FILE_BUFFER_LEN)
                 num_bytes = file_send_socket.send(bytes_read)
                 total_bytes_read += num_bytes
@@ -821,6 +834,21 @@ if __name__ == "__main__":
         )
         client_send_socket.sendall(share_data_header + share_data)
 
+        try:
+            with open(
+                f"/Flux/db/{my_username}_transfer_progress.obj", mode="rb"
+            ) as transfer_dump:
+                transfer_dump.seek(0)
+                transfer_progress = pickle.load(transfer_dump)
+                logging.debug(
+                    msg=f"Transfer Progress loaded from dump\n{pformat(transfer_progress)}"
+                )
+        except Exception as e:
+            # Fallback if no dump was created
+            logging.error(msg=f"Failed to load transfer progress from dump: {e}")
+            transfer_progress = generate_transfer_progress()
+            logging.debug(msg=f"Transfer Progress generated\n{pformat(transfer_progress)}")
+
         threading.excepthook = excepthook
         send_thread = threading.Thread(target=send_handler)
         receive_thread = threading.Thread(target=receive_handler)
@@ -828,7 +856,10 @@ if __name__ == "__main__":
         receive_thread.start()
         send_thread.join()
     except (KeyboardInterrupt, EOFError, SystemExit):
+        with open(f"/Flux/db/{my_username}_transfer_progress.obj", mode="wb") as transfer_dump:
+            pickle.dump(transfer_progress, transfer_dump)
+
         sys.exit(0)
     except:
-        logging.fatal(msg=sys.exc_info()[0])
+        logging.fatal(msg=sys.exc_info()[0], exc_info=True)
         sys.exit(1)

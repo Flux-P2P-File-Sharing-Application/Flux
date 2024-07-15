@@ -18,6 +18,7 @@ class CompressionMethod(Enum):
     ZSTD = 1
 
 class TransferStatus(Enum):
+    NEVER_STARTED = 0
     DOWNLOADING = 1
     PAUSED = 2
     COMPLETED = 3
