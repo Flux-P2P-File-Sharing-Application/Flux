@@ -32,7 +32,14 @@ logging.basicConfig(
     ],
 )
 
-flux_db = TinyDB("P:/Flux/db/db.json")
+# Construct a relative path for the database
+project_root = Path(__file__).resolve().parents[2]
+db_path = project_root / "db" / "db.json"
+
+# Ensure the database directory exists
+db_path.parent.mkdir(parents=True, exist_ok=True)
+
+flux_db = TinyDB(db_path)
 
 print(f"SERVER IP: {IP}")
 
@@ -77,7 +84,7 @@ def receive_msg(client_socket: socket.socket) -> Message:
         message_len = int(client_socket.recv(HEADER_MSG_LEN).decode(FMT))
         query = client_socket.recv(message_len)
         logging.debug(
-            msg=f"Received packet: TYPE {message_type} QUERY {query!r} from {client_socket.getpeername()}"
+            msg=f"Received packet: TYPE {message_type} LEN {message_len} QUERY query!r from {client_socket.getpeername()}"
         )
         return {"type": HeaderCode(message_type), "query": query}
 
@@ -226,7 +233,8 @@ def read_handler(notified_socket: socket.socket) -> None:
                     User = Query()
                     if username is not None:
                         flux_db.upsert(
-                            {"uname": username, "share": share_data}, User.uname == username
+                            {"uname": username, "share": share_data},
+                            User.uname == username,
                         )
                     else:
                         raise RequestException(
