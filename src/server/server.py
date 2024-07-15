@@ -1,27 +1,29 @@
 import logging
 import select
 import socket
-import sqlite3
 import sys
 import os
+from pathlib import Path
 
 import msgpack
+from tinydb import Query, TinyDB
 
-from ..utils.exceptions import ExceptionCode, RequestException
-from ..utils.types import FileMetadata, FileSearchResult, HeaderCode, Message, UpdateHashParams
+# Add the src directory to the PYTHONPATH
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-# Constants for header lengths and formats
-HEADER_TYPE_LENGTH = 1
-HEADER_MESSAGE_LENGTH = 7
-SERVER_IP = socket.gethostbyname(socket.gethostname())
-SERVER_PORT = 1234
-ENCODING_FORMAT = "utf-8"
+from utils.constants import FMT, HEADER_MSG_LEN, HEADER_TYPE_LEN, SERVER_RECV_PORT
+from utils.exceptions import ExceptionCode, RequestException
+from utils.helpers import update_file_hash
+from utils.types import DBData, DirData, HeaderCode, Message, UpdateHashParams
+
+IP = socket.gethostbyname(socket.gethostname())
 
 # Ensure the logs directory exists
 log_directory = "./logs"
 os.makedirs(log_directory, exist_ok=True)
 
-log_filename = f"{log_directory}/server_{SERVER_IP}.log"
+log_filename = os.path.join(log_directory, f"server_{IP}.log")
+
 logging.basicConfig(
     level=logging.DEBUG,
     handlers=[
@@ -30,80 +32,27 @@ logging.basicConfig(
     ],
 )
 
-# Create a TCP/IP socket
-server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+flux_db = TinyDB("P:/Flux/db/db.json")
 
-# Allow reusing the same address
+print(f"SERVER IP: {IP}")
+
+server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-# Bind the socket to the server's IP address and port
-server_socket.bind((SERVER_IP, SERVER_PORT))
-
-# Listen for incoming connections
+server_socket.bind((IP, SERVER_RECV_PORT))
 server_socket.listen(5)
 
-# List of active sockets including the server socket
-sockets_list  = [server_socket]
-
-# Mapping of usernames to addresses (IP, PORT)
+sockets_list = [server_socket]
+# uname -> IP
 uname_to_ip: dict[str, str] = {}
-# Mapping of IP to usernames
 ip_to_uname: dict[str, str] = {}
 
-# Connect to the SQLite database (creates the file if it doesn't exist)
-db_connection = sqlite3.connect("files.db")
-db = db_connection.cursor()
-
-# Create table for files if it doesn't exist
-db.execute(
-    """
-    CREATE TABLE IF NOT EXISTS files (
-        uname TEXT NOT NULL,
-        filepath TEXT NOT NULL,
-        filesize INTEGER NOT NULL,
-        hash TEXT,
-        PRIMARY KEY (uname, filepath)
-    )
-    """
-)
-db.execute(
-    """
-    CREATE INDEX IF NOT EXISTS files_by_filepath ON files(filepath)
-    """
-)
-db_connection.commit()
-
-
-# NEW SHARE_DATA
-def insert_share_data(uname: str, filepath: str, filesize: int, hash: str | None):
-    query = """
-            INSERT INTO files(uname, filepath, filesize, hash) VALUES (?, ?, ?, ?)
-            """
-    args = (uname, filepath, filesize, hash)
-    db.execute(query, args)
-
-
-def search_files(query_string: str, self_uname: str) -> list[FileSearchResult]:
-    query = """
-            SELECT uname, filepath, filesize, hash FROM files WHERE filepath LIKE ? AND uname != ?
-            """
-    args = ("%" + query_string + "%", self_uname)
-    db.execute(query, args)
-    return [FileSearchResult(*result) for result in db.fetchall()]
-
-
-def update_file_hash(uname: str, filepath: str, hash: str) -> None:
-    query = """
-            UPDATE files SET hash = ? WHERE uname = ? AND filepath = ?
-            """
-    args = (hash, uname, filepath)
-    db.execute(query, args)
 
 def receive_msg(client_socket: socket.socket) -> Message:
     """
     Receive a message from the client socket.
     """
-    message_type = client_socket.recv(HEADER_TYPE_LENGTH).decode(ENCODING_FORMAT)
+    message_type = client_socket.recv(HEADER_TYPE_LEN).decode(FMT)
     if not len(message_type):
         # Handle client disconnect
         raise RequestException(
@@ -112,8 +61,8 @@ def receive_msg(client_socket: socket.socket) -> Message:
         )
     if message_type not in [
         HeaderCode.NEW_CONNECTION.value,
+        HeaderCode.REQUEST_IP.value,
         HeaderCode.REQUEST_UNAME.value,
-        HeaderCode.LOOKUP_ADDRESS.value,
         HeaderCode.SHARE_DATA.value,
         HeaderCode.FILE_SEARCH.value,
     ]:
@@ -125,7 +74,7 @@ def receive_msg(client_socket: socket.socket) -> Message:
         )
     else:
         # Receive message length and query data
-        message_len = int(client_socket.recv(HEADER_MESSAGE_LENGTH).decode(ENCODING_FORMAT))
+        message_len = int(client_socket.recv(HEADER_MSG_LEN).decode(FMT))
         query = client_socket.recv(message_len)
         logging.debug(
             msg=f"Received packet: TYPE {message_type} QUERY {query!r} from {client_socket.getpeername()}"
@@ -146,7 +95,7 @@ def read_handler(notified_socket: socket.socket) -> None:
         try:
             # Process initial message from new client
             user_data = receive_msg(client_socket)
-            username = user_data["query"].decode(ENCODING_FORMAT)
+            username = user_data["query"].decode(FMT)
             sockets_list .append(client_socket)
 
             if user_data["type"] == HeaderCode.NEW_CONNECTION:
@@ -165,7 +114,7 @@ def read_handler(notified_socket: socket.socket) -> None:
                             f" username: {username}"
                         ),
                     )
-                    client_socket.send(f"{HeaderCode.NEW_CONNECTION.value}".encode(ENCODING_FORMAT))
+                    client_socket.send(f"{HeaderCode.NEW_CONNECTION.value}".encode(FMT))
                 # Check if the address is already registered
                 else:
                     if address != client_address[0]:
@@ -189,7 +138,7 @@ def read_handler(notified_socket: socket.socket) -> None:
                 data = msgpack.packb(
                     e, default=RequestException.to_dict, use_bin_type=True
                 )
-                header = f"{HeaderCode.ERROR.value}{len(data):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
+                header = f"{HeaderCode.ERROR.value}{len(data):<{HEADER_MSG_LEN}}".encode(FMT)
                 client_socket.send(header + data)
 
             uname = ip_to_uname.pop(client_address[0], None)
@@ -202,14 +151,14 @@ def read_handler(notified_socket: socket.socket) -> None:
             # Handle requests from existing clients
             request = receive_msg(notified_socket)
             match request["type"]:
-                case HeaderCode.REQUEST_UNAME:
-                    response_data = uname_to_ip.get(request["query"].decode(ENCODING_FORMAT))
+                case HeaderCode.REQUEST_IP:
+                    response_data = uname_to_ip.get(request["query"].decode(FMT))
                     if response_data is not None:
                         if response_data != notified_socket.getpeername()[0]:
                             logging.debug(msg=f"Valid request: {response_data}")
-                            data = response_data.encode(ENCODING_FORMAT)
-                            header = f"{HeaderCode.REQUEST_UNAME.value}{len(data):<{HEADER_MESSAGE_LENGTH}}".encode(
-                                ENCODING_FORMAT
+                            data = response_data.encode(FMT)
+                            header = f"{HeaderCode.REQUEST_IP.value}{len(data):<{HEADER_MSG_LEN}}".encode(
+                                FMT
                             )
                             notified_socket.send(header + data)
                         else:
@@ -219,17 +168,17 @@ def read_handler(notified_socket: socket.socket) -> None:
                             )
                     else:
                         raise RequestException(
-                            msg=f"Username {request['query'].decode(ENCODING_FORMAT)} not found",
+                            msg=f"Username {request['query'].decode(FMT)} not found",
                             code=ExceptionCode.NOT_FOUND,
                         )
-                case HeaderCode.LOOKUP_ADDRESS:
-                    lookup_addr = request["query"].decode(ENCODING_FORMAT)
+                case HeaderCode.REQUEST_UNAME:
+                    lookup_addr = request["query"].decode(FMT)
                     if lookup_addr != notified_socket.getpeername()[0]:
                         username = ip_to_uname.get(lookup_addr)
                         if username is not None:
-                            username_bytes = username.encode(ENCODING_FORMAT)
-                            header = f"{HeaderCode.LOOKUP_ADDRESS.value}{len(username):<{HEADER_MESSAGE_LENGTH}}".encode(
-                                ENCODING_FORMAT
+                            username_bytes = username.encode(FMT)
+                            header = f"{HeaderCode.REQUEST_UNAME.value}{len(username):<{HEADER_MSG_LEN}}".encode(
+                                FMT
                             )
                             notified_socket.send(header + username_bytes)
                         else:
@@ -244,7 +193,7 @@ def read_handler(notified_socket: socket.socket) -> None:
                         )
                         
                 case HeaderCode.NEW_CONNECTION:
-                    uname = request["query"].decode(ENCODING_FORMAT)
+                    uname = request["query"].decode(FMT)
                     addr = uname_to_ip.get(uname)
                     client_addr = notified_socket.getpeername()
                     logging.debug(
@@ -259,7 +208,7 @@ def read_handler(notified_socket: socket.socket) -> None:
                                 f" username: {uname}"
                             )
                         )
-                        notified_socket.send(f"{HeaderCode.NEW_CONNECTION.value}".encode(ENCODING_FORMAT))
+                        notified_socket.send(f"{HeaderCode.NEW_CONNECTION.value}".encode(FMT))
                     else:
                         if addr != client_addr[0]:
                             raise RequestException(
@@ -272,17 +221,13 @@ def read_handler(notified_socket: socket.socket) -> None:
                                 code=ExceptionCode.BAD_REQUEST,
                             )
                 case HeaderCode.SHARE_DATA:
-                    share_data: list[FileMetadata] = msgpack.unpackb(request["query"])
+                    share_data: list[DirData] = msgpack.unpackb(request["query"])
                     username = ip_to_uname.get(notified_socket.getpeername()[0])
+                    User = Query()
                     if username is not None:
-                        for file_data in share_data:
-                            insert_share_data(
-                                username,
-                                file_data["name"],
-                                file_data["size"],
-                                file_data.get("hash", None),
-                            )
-                        db_connection.commit()
+                        flux_db.upsert(
+                            {"uname": username, "share": share_data}, User.uname == username
+                        )
                     else:
                         raise RequestException(
                             msg=f"Username does not exist",
@@ -292,11 +237,20 @@ def read_handler(notified_socket: socket.socket) -> None:
                     update_hash_params: UpdateHashParams = msgpack.unpackb(request["query"])
                     username = ip_to_uname.get(notified_socket.getpeername()[0])
                     if username is not None:
-                        update_file_hash(
-                            username,
-                            update_hash_params["filepath"],
-                            update_hash_params["hash"],
-                        )
+                        User = Query()
+                        try:
+                            user_share = flux_db.search(User.uname == username)[0]["share"]
+                            update_file_hash(
+                                user_share,
+                                update_hash_params["filepath"],
+                                update_hash_params["hash"],
+                            )
+                            flux_db.update({"share": user_share}, User.uname == username)
+                        except IndexError:
+                            raise RequestException(
+                                msg=f"Username does not exist",
+                                code=ExceptionCode.NOT_FOUND,
+                            )
                     else:
                         raise RequestException(
                             msg=f"Username does not exist",
@@ -305,13 +259,12 @@ def read_handler(notified_socket: socket.socket) -> None:
                 case HeaderCode.FILE_SEARCH:
                     username = ip_to_uname.get(notified_socket.getpeername()[0])
                     if username is not None:
-                        search_result = search_files(request["query"].decode(ENCODING_FORMAT), username)
-                        logging.debug(f"{search_result}")
-                        search_result_bytes = msgpack.packb(search_result)
-                        search_result_header = f"{HeaderCode.FILE_SEARCH.value}{len(search_result_bytes):<{HEADER_MESSAGE_LENGTH}}".encode(
-                            ENCODING_FORMAT
-                        )
-                        notified_socket.send(search_result_header + search_result_bytes)
+                        User = Query()
+                        browse_files: list[DBData] = flux_db.search(User.uname != username)
+                        logging.debug(f"{browse_files}")
+                        browse_files_bytes = msgpack.packb(browse_files)
+                        browse_files_header = f"{HeaderCode.FILE_SEARCH.value}{len(browse_files_bytes):<{HEADER_MSG_LEN}}".encode(FMT)
+                        notified_socket.send(browse_files_header + browse_files_bytes)
                     else:
                         raise RequestException(
                             msg=f"Username does not exist",
@@ -322,42 +275,29 @@ def read_handler(notified_socket: socket.socket) -> None:
                         msg=f"Bad request from {notified_socket.getpeername()}",
                         code=ExceptionCode.BAD_REQUEST,
                     )
+        except TypeError as e:
+            logging.error(msg=e)
+            sys.exit(0)
         except RequestException as e:
-            # Handle exceptions and send error responses
-            if e.code != ExceptionCode.DISCONNECT:
-                data = msgpack.packb(
-                    e, default=RequestException.to_dict, use_bin_type=True
-                )
-                header = f"{HeaderCode.ERROR.value}{len(data):<{HEADER_MESSAGE_LENGTH}}".encode(ENCODING_FORMAT)
+            if e.code == ExceptionCode.DISCONNECT:
+                try:
+                    sockets_list.remove(notified_socket)
+                    addr_to_remove: str = notified_socket.getpeername()[0]
+                    uname = ip_to_uname.pop(addr_to_remove, None)
+                    uname_to_ip.pop(uname, None)
+                except ValueError:
+                    logging.info("already removed")
+            else:
+                data = msgpack.packb(e, default=RequestException.to_dict, use_bin_type=True)
+                header = f"{HeaderCode.ERROR.value}{len(data):<{HEADER_MSG_LEN}}".encode(FMT)
                 notified_socket.send(header + data)
-            client_address = notified_socket.getpeername()
-            uname = ip_to_uname.pop(client_address[0], None)
-            uname_to_ip.pop(uname, None)
-            logging.error(msg=e.msg)
+            logging.error(msg=f"Exception: {e.msg}")
             return
+        
+while True:
+    read_sockets: list[socket.socket]
+    exception_sockets: list[socket.socket]
 
-def main():
-    """
-    Main function to run the server.
-    """
-    logging.info(f"Server listening on {SERVER_IP}:{SERVER_PORT}")
-    try:
-        while True:
-            read_sockets, _, exception_sockets = select.select(
-                sockets_list, [], sockets_list
-            )
-            for notified_socket in read_sockets:
-                read_handler(notified_socket)
-            for notified_socket in exception_sockets:
-                # Close the socket if there's an exception
-                sockets_list.remove(notified_socket)
-                notified_socket.close()
-    except KeyboardInterrupt:
-        logging.info("Server shutting down.")
-    finally:
-        # Clean up resources on server shutdown
-        server_socket.close()
-        db_connection.close()
-
-if __name__ == "__main__":
-    main()
+    read_sockets, _, exception_sockets = select.select(sockets_list, [], sockets_list, 0.1)
+    for notified_socket in read_sockets:
+        read_handler(notified_socket)

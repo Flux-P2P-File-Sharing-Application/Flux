@@ -11,7 +11,6 @@ class HeaderCode(Enum):
     REQUEST_IP = "r"
     SHARE_DATA = "d"
     UPDATE_HASH = "h"
-    LOOKUP_ADDRESS = "l"
 
 class CompressionMethod(Enum):
     NONE = 0
