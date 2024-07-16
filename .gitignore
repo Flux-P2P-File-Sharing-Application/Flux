@@ -8,4 +8,5 @@ logs
 share
 downloads
 
-db
+db 
+db.json

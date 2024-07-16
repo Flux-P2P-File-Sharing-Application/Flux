@@ -91,44 +91,84 @@ def receive_msg(client_socket: socket.socket) -> Message:
         return {"type": HeaderCode(message_type), "query": query}
 
 def read_handler(notified_socket: socket.socket) -> None:
-    """
-    Handle incoming requests from clients.
-    """
     global uname_to_ip
-    global sockets_list 
-    logging.info(f"CLIENTS {uname_to_ip}")
-    
-    # Accept new connections
+    global sockets_list
     if notified_socket == server_socket:
-        client_socket, client_address = server_socket.accept()
+        client_socket, client_addr = server_socket.accept()
         try:
-            # Process initial message from new client
-            user_data = receive_msg(client_socket)
-            username = user_data["query"].decode(FMT)
-            sockets_list .append(client_socket)
-
-            if user_data["type"] == HeaderCode.NEW_CONNECTION:
-                address = uname_to_ip.get(username)
+            # userdata = receive_msg(client_socket)
+            # uname = userdata["query"].decode(FMT)
+            sockets_list.append(client_socket)
+            # if userdata["type"] == HeaderCode.NEW_CONNECTION:
+            #     addr = uname_to_ip.get(uname)
+            #     logging.debug(
+            #         msg=f"Registration request for username {uname} from address {client_addr}"
+            #     )
+            #     if addr is None:
+            #         uname_to_ip[uname] = client_addr[0]
+            #         ip_to_uname[client_addr[0]] = uname
+            #         logging.debug(
+            #             msg=(
+            #                 "Accepted new connection from"
+            #                 f" {client_addr[0]}:{client_addr[1]}"
+            #                 f" username: {userdata['query'].decode(FMT)}"
+            #             )
+            #         )
+            #         client_socket.send(f"{HeaderCode.NEW_CONNECTION.value}".encode(FMT))
+            #     else:
+            #         if addr != client_addr[0]:
+            #             raise RequestException(
+            #                 msg=f"User with username {addr} already exists",
+            #                 code=ExceptionCode.USER_EXISTS,
+            #             )
+            #         else:
+            #             raise RequestException(
+            #                 msg="Cannot re-register user for same address",
+            #                 code=ExceptionCode.BAD_REQUEST,
+            #             )
+            # else:
+            #     raise RequestException(
+            #         msg=f"Bad request from {client_addr}",
+            #         code=ExceptionCode.BAD_REQUEST,
+            #     )
+        except RequestException as e:
+            if e.code != ExceptionCode.DISCONNECT:
+                data: bytes = msgpack.packb(e, default=RequestException.to_dict, use_bin_type=True)
+                header = f"{HeaderCode.ERROR.value}{len(data):<{HEADER_MSG_LEN}}".encode(FMT)
+                client_socket.send(header + data)
+            uname = ip_to_uname.pop(client_addr[0], None)
+            uname_to_ip.pop(uname, None)
+            logging.error(msg=e.msg)
+            return
+    else:
+        try:
+            request = receive_msg(notified_socket)
+            client_addr = notified_socket.getpeername()
+            if ip_to_uname.get(notified_socket.getpeername()[0]) is None:
+                if request["type"] != HeaderCode.NEW_CONNECTION:
+                    raise RequestException(
+                        msg=f"User at {client_addr} not registered", code=ExceptionCode.UNAUTHORIZED
+                    )
+                uname = request["query"].decode(FMT)
+                addr = uname_to_ip.get(uname)
                 logging.debug(
-                    msg=f"Registration request for username {username} from address {client_address}"
+                    msg=f"Registration request for username {uname} from address {client_addr}"
                 )
-                # Check if the username is already registered
-                if address is None:
-                    uname_to_ip[username] = client_address[0]
-                    ip_to_uname[client_address[0]] = username
+                if addr is None:
+                    uname_to_ip[uname] = client_addr[0]
+                    ip_to_uname[client_addr[0]] = uname
                     logging.debug(
                         msg=(
                             "Accepted new connection from"
-                            f" {client_address[0]}:{client_address[1]}"
-                            f" username: {username}"
-                        ),
+                            f" {client_addr[0]}:{client_addr[1]}"
+                            f" username: {request['query'].decode(FMT)}"
+                        )
                     )
-                    client_socket.send(f"{HeaderCode.NEW_CONNECTION.value}".encode(FMT))
-                # Check if the address is already registered
+                    notified_socket.send(f"{HeaderCode.NEW_CONNECTION.value}".encode(FMT))
                 else:
-                    if address != client_address[0]:
+                    if addr != client_addr[0]:
                         raise RequestException(
-                            msg=f"User with username {address} already exists",
+                            msg=f"User with username {addr} already exists",
                             code=ExceptionCode.USER_EXISTS,
                         )
                     else:
@@ -136,29 +176,7 @@ def read_handler(notified_socket: socket.socket) -> None:
                             msg="Cannot re-register user for same address",
                             code=ExceptionCode.BAD_REQUEST,
                         )
-            else:
-                raise RequestException(
-                    msg=f"Bad request from {client_address}",
-                    code=ExceptionCode.BAD_REQUEST,
-                )
-        except RequestException as e:
-            # Handle exceptions and send error responses
-            if e.code != ExceptionCode.DISCONNECT:
-                data = msgpack.packb(
-                    e, default=RequestException.to_dict, use_bin_type=True
-                )
-                header = f"{HeaderCode.ERROR.value}{len(data):<{HEADER_MSG_LEN}}".encode(FMT)
-                client_socket.send(header + data)
-
-            uname = ip_to_uname.pop(client_address[0], None)
-            uname_to_ip.pop(uname, None)
-
-            logging.error(msg=e.msg)
-            return
-    else:
-        try:
-            # Handle requests from existing clients
-            request = receive_msg(notified_socket)
+                return
             match request["type"]:
                 case HeaderCode.REQUEST_IP:
                     response_data = uname_to_ip.get(request["query"].decode(FMT))
@@ -200,7 +218,6 @@ def read_handler(notified_socket: socket.socket) -> None:
                             msg="Cannot query for user having the same address",
                             code=ExceptionCode.BAD_REQUEST,
                         )
-                        
                 case HeaderCode.NEW_CONNECTION:
                     uname = request["query"].decode(FMT)
                     addr = uname_to_ip.get(uname)
@@ -273,7 +290,9 @@ def read_handler(notified_socket: socket.socket) -> None:
                         browse_files: list[DBData] = flux_db.search(User.uname != username)
                         logging.debug(f"{browse_files}")
                         browse_files_bytes = msgpack.packb(browse_files)
-                        browse_files_header = f"{HeaderCode.FILE_SEARCH.value}{len(browse_files_bytes):<{HEADER_MSG_LEN}}".encode(FMT)
+                        browse_files_header = f"{HeaderCode.FILE_SEARCH.value}{len(browse_files_bytes):<{HEADER_MSG_LEN}}".encode(
+                            FMT
+                        )
                         notified_socket.send(browse_files_header + browse_files_bytes)
                     else:
                         raise RequestException(
@@ -287,7 +306,7 @@ def read_handler(notified_socket: socket.socket) -> None:
                     )
         except TypeError as e:
             logging.error(msg=e)
-            sys.exit(0)
+            # sys.exit(0)
         except RequestException as e:
             if e.code == ExceptionCode.DISCONNECT:
                 try:

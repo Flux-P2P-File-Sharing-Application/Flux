@@ -3,8 +3,25 @@ import logging
 import os
 from pathlib import Path
 
-from utils.constants import HASH_BUFFER_LEN, RECV_FOLDER_PATH, SHARE_FOLDER_PATH, TEMP_FOLDER_PATH
+from prompt_toolkit.validation import ValidationError, Validator
+
+from utils.constants import (
+    HASH_BUFFER_LEN,
+    MESSAGE_MAX_LEN,
+    RECV_FOLDER_PATH,
+    SHARE_FOLDER_PATH,
+    TEMP_FOLDER_PATH,
+)
+
 from utils.types import CompressionMethod, DirData, FileMetadata, TransferProgress, TransferStatus
+
+class MessageLenValidator(Validator):
+    def validate(self, document) -> None:
+        text = document.text
+        if len(text) > MESSAGE_MAX_LEN:
+            raise ValidationError(
+                message=f"Message is too long. Limit to {MESSAGE_MAX_LEN} characters"
+            )
 
 def generate_transfer_progress() -> dict[Path, TransferProgress]:
     transfer_progress: dict[Path, TransferProgress] = {}
@@ -69,9 +86,13 @@ def update_file_hash(share: list[DirData], file_path: str, new_hash: str):
 
 
 def find_file(share: list[DirData] | None, path: str) -> DirData | None:
+    # print("\nfind_file loop: ")
+    # print(share)
     if share is None:
         return None
     for item in share:
+        # print(f"item path: {item['path']}")
+        # print(f"search path: {path}")
         if item["path"] == path:
             return item
         else:

@@ -11,7 +11,6 @@ import sys
 import msgpack
 import tqdm
 import pickle
-import time
 
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -38,6 +37,7 @@ from utils.constants import (
 )
 from utils.exceptions import ExceptionCode, RequestException
 from utils.helpers import (
+    MessageLenValidator,
     display_share_dict,
     find_file,
     get_file_hash,
@@ -62,7 +62,7 @@ from utils.types import (
 
 # Set the client's IP and server's IP, address
 CLIENT_IP = socket.gethostbyname(socket.gethostname())
-SERVER_IP = input("Enter SERVER IP: ")
+SERVER_IP = ""
 SERVER_ADDR = (SERVER_IP, SERVER_RECV_PORT)
 
 # Ensure the necessary directories exist
@@ -91,17 +91,26 @@ client_recv_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 # client_recv_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_CORK, 0)
 client_send_socket.bind((CLIENT_IP, CLIENT_SEND_PORT))
 client_recv_socket.bind((CLIENT_IP, CLIENT_RECV_PORT))
-client_send_socket.connect((SERVER_IP, SERVER_RECV_PORT))
+
+while True:
+    try:
+        SERVER_IP = input("Enter SERVER IP: ")
+        SERVER_ADDR = (SERVER_IP, SERVER_RECV_PORT)
+        client_send_socket.connect((SERVER_IP, SERVER_RECV_PORT))
+        break
+    except:
+        print("\nNo server found at this IP. Try again.")
+
 client_recv_socket.listen(5)
 connected = [client_recv_socket]
 transfer_progress: dict[Path, TransferProgress] = {}
 
-username = ""
+my_username = ""
 
 def prompt_username() -> str:
-    global username
-    username = input("Enter username: ")
-    username = username.encode(FMT)
+    global my_username
+    my_username = input("Enter username: ")
+    username = my_username.encode(FMT)
     username_header = f"{HeaderCode.NEW_CONNECTION.value}{len(username):<{HEADER_MSG_LEN}}".encode(
         FMT
     )
@@ -255,9 +264,9 @@ def send_handler() -> None:
     global client_send_socket
     with StdoutProxy(sleep_between_writes=0):
         mode_prompt: PromptSession = PromptSession(
-            "\nMODE : \n1. Browse files\n2. Send message\n3. Pause/resume downloads\n4. Exit\n"
+            "\nMODE: \n1. Browse files\n2. Send message\n3. Pause/resume downloads\n4. Exit\nEnter Mode: "
         )
-        recipient_prompt: PromptSession = PromptSession("Enter username :")
+        recipient_prompt: PromptSession = PromptSession("Enter username: ")
         while True:
             mode = mode_prompt.prompt()
             match mode:
@@ -311,17 +320,20 @@ def send_handler() -> None:
                                 continue
                             selected_user = browse_files[int(uname_choice) - 1]
                             files_requested = selected_user["share"]
-                            print(selected_user["uname"] + "/share/")
+                            print("\n" + selected_user["uname"] + "/share/")
                             display_share_dict(files_requested, 1)
 
                             file_choice_prompt: PromptSession = PromptSession(
                                 "Enter filepath to download: "
                             )
                             file_choice: str = file_choice_prompt.prompt()
+                            # print(f"Selected file: {file_choice}")
                             file_item = find_file(selected_user["share"], file_choice)
 
+                            # print(f"received file: {file_item}")
+
                             if file_item is None:
-                                print("File path not found")
+                                print("\nFile path not found")
                                 continue
 
                             peer_ip = request_ip(selected_user["uname"], client_send_socket)
@@ -335,7 +347,15 @@ def send_handler() -> None:
                                         unit="B",
                                         unit_scale=True,
                                         unit_divisor=1024,
+                                        colour="green",                                        
                                     )
+                                    transfer_progress[
+                                        TEMP_FOLDER_PATH
+                                        / (selected_user["uname"] + file_item["path"])
+                                    ] = {
+                                        "progress": 0,
+                                        "status": TransferStatus.NEVER_STARTED,
+                                    }
                                     executor.submit(
                                         req_file_worker,
                                         file_item,
@@ -356,7 +376,15 @@ def send_handler() -> None:
                                         unit="B",
                                         unit_scale=True,
                                         unit_divisor=1024,
+                                        colour="green",
                                     )
+                                    for f in files_to_request:
+                                        transfer_progress[
+                                            TEMP_FOLDER_PATH / (selected_user["uname"] + f["path"])
+                                        ] = {
+                                            "progress": 0,
+                                            "status": TransferStatus.NEVER_STARTED,
+                                        }
                                     executor.map(
                                         req_file_worker,
                                         files_to_request,
@@ -365,9 +393,9 @@ def send_handler() -> None:
                                         [progress_bar] * len(files_to_request),
                                     )
                             else:
-                                print(f"No user found with username {selected_user['uname']}")
+                                print(f"\nNo user found with username {selected_user['uname']}")
                         else:
-                            print("No results found")
+                            print("\nNo results found")
                     else:
                         logging.error("Error occured while searching for files")
                 case "2":
@@ -393,7 +421,8 @@ def send_handler() -> None:
                             client_peer_socket.connect((recipient_addr, CLIENT_RECV_PORT))
                             while True:
                                 msg_prompt: PromptSession = PromptSession(
-                                    f"\nEnter message for {recipient.decode(FMT)}: "
+                                    f"\nEnter message for {recipient.decode(FMT)}: ",
+                                    validator=MessageLenValidator(),
                                 )
                                 msg = msg_prompt.prompt()
                                 if len(msg):
@@ -435,10 +464,11 @@ def send_handler() -> None:
                                                 )
                                                 with tqdm.tqdm(
                                                     total=filemetadata["size"],
-                                                    desc=f"Sending {str(filepath)}",
+                                                    desc=f"Sending {str(filepath).removeprefix(str(SHARE_FOLDER_PATH) + '/')}",
                                                     unit="B",
                                                     unit_scale=True,
                                                     unit_divisor=1024,
+                                                    colour="green",
                                                 ) as progress:
                                                     total_bytes_read = 0
                                                     while total_bytes_read != filemetadata["size"]:
@@ -450,14 +480,14 @@ def send_handler() -> None:
                                                         total_bytes_read += num_bytes
                                                         progress.update(num_bytes)
                                                     progress.close()
-                                                    print("File Sent")
+                                                    print("\nFile Sent")
                                                     file_to_send.close()
                                             except Exception as e:
                                                 logging.error(f"File Sending failed: {e}")
                                         else:
                                             logging.error(f"{filepath} not found")
                                             print(
-                                                f"Unable to perform send request, ensure that the file is available in {SHARE_FOLDER_PATH}"
+                                                f"\nUnable to perform send request, ensure that the file is available in {SHARE_FOLDER_PATH}"
                                             )
                                     else:
                                         msg = msg.encode(FMT)
@@ -490,7 +520,7 @@ def send_handler() -> None:
                             if path in transfer_progress:
                                 if transfer_progress[path]["status"] == TransferStatus.DOWNLOADING:
                                     transfer_progress[path]["status"] = TransferStatus.PAUSED
-                                    print(f"Paused transfer for file {str(path)}")
+                                    print(f"\nPaused transfer for file {str(path)}")
                                 elif transfer_progress[path]["status"] == TransferStatus.PAUSED:
                                     uname = (
                                         str(path).removeprefix(str(TEMP_FOLDER_PATH)).split("/")[1]
@@ -513,16 +543,19 @@ def send_handler() -> None:
                                             unit="B",
                                             unit_scale=True,
                                             unit_divisor=1024,
+                                            colour="green",
                                         )                                        
                                         executor.submit(
                                             req_file_worker, file_item, uname, peer_ip, progress_bar
                                         )
                                     else:
-                                        print(f"User with username {uname} not found")
+                                        print(f"\nUser with username {uname} not found")
                                 else:
-                                    print(f"Download status for file {str(path)} cannot be changed")
+                                    print(
+                                        f"\nDownload status for file {str(path)} cannot be changed"
+                                    )
                             else:
-                                print("Could not retrieve file transfer status")
+                                print("\nCould not retrieve file transfer status")
                         elif path.is_dir():
                             uname = str(path).removeprefix(str(TEMP_FOLDER_PATH)).split("/")[1]
                             peer_ip = request_ip(uname, client_send_socket)
@@ -553,7 +586,7 @@ def send_handler() -> None:
                                             transfer_progress[pathname][
                                                 "status"
                                             ] = TransferStatus.PAUSED
-                                            print(f"Paused transfer for file {str(pathname)}")
+                                            print(f"\nPaused transfer for file {str(pathname)}")
 
                                 total_size = sum([file["size"] for file in paused_dir_files])
                                 progress_bar = tqdm.tqdm(
@@ -562,6 +595,7 @@ def send_handler() -> None:
                                     unit="B",
                                     unit_scale=True,
                                     unit_divisor=1024,
+                                    colour="green",
                                 )                                            
                                 executor.map(
                                     req_file_worker,
@@ -571,7 +605,7 @@ def send_handler() -> None:
                                     [progress_bar] * len(paused_dir_files),                                    
                                 )
                         else:
-                            print("File does not exist")
+                            print("\nFile does not exist")
                 case "4":
                     if os.name == "nt":
                         os._exit(0)
@@ -628,10 +662,11 @@ def send_file(
         file_send_socket.send(filesend_header + filemetadata_bytes)
         with tqdm.tqdm(
             total=filemetadata["size"] - resume_offset,
-            desc=f"Sending {str(filepath)}",
+            desc=f"Sending {str(filepath).removeprefix(str(SHARE_FOLDER_PATH) + '/')}",
             unit="B",
             unit_scale=True,
             unit_divisor=1024,
+            colour="green",
         ) as progress:
             total_bytes_read = 0
             file_to_send.seek(resume_offset)
@@ -645,7 +680,7 @@ def send_file(
                     f"Sent chunk of size {num_bytes}, total {total_bytes_read} of {filemetadata['size']}"
                 )
             progress.close()
-            print("File Sent")
+            print("\nFile Sent")
             file_to_send.close()
             file_send_socket.close()
         if request_hash:
@@ -701,6 +736,7 @@ def receive_msg(socket: socket.socket) -> str:
                             unit="B",
                             unit_scale=True,
                             unit_divisor=1024,
+                            colour="green",
                         ) as progress:
                             while byte_count != file_header["size"]:
                                 file_bytes_read: bytes = socket.recv(FILE_BUFFER_LEN)
@@ -784,7 +820,7 @@ def receive_handler() -> None:
                         response = client_send_socket.recv(response_length)
                         if res_type == HeaderCode.REQUEST_UNAME.value:
                             username = response.decode(FMT)
-                            print(f"User {username} is trying to send a message")
+                            print(f"\nUser {username} is trying to send a message")
                             peers[peer_addr[0]] = username
                         else:
                             exception = msgpack.unpackb(
@@ -801,7 +837,7 @@ def receive_handler() -> None:
                 try:
                     msg: str = receive_msg(notified_socket)
                     username = peers[notified_socket.getpeername()[0]]
-                    print(f"{username} > {msg}")
+                    print(f"\n{username} > {msg}")
                 except RequestException as e:
                     if e.code == ExceptionCode.DISCONNECT:
                         try:
@@ -827,14 +863,14 @@ if __name__ == "__main__":
             )
             if exception.code == ExceptionCode.USER_EXISTS:
                 logging.error(msg=exception.msg)
-                print("Sorry that username is taken, please choose another one")
+                print("\nSorry that username is taken, please choose another one")
             else:
                 logging.fatal(msg=exception.msg)
-                print("Sorry something went wrong")
+                print("\nSorry something went wrong")
                 client_send_socket.close()
                 client_recv_socket.close()
                 sys.exit(1)
-        print("Successfully registered")
+        print("\nSuccessfully registered")
         share_data = msgpack.packb(path_to_dict(SHARE_FOLDER_PATH)["children"])
         share_data_header = (
             f"{HeaderCode.SHARE_DATA.value}{len(share_data):<{HEADER_MSG_LEN}}".encode(FMT)
@@ -842,7 +878,7 @@ if __name__ == "__main__":
         client_send_socket.sendall(share_data_header + share_data)
 
         try:
-            with open(f"/Flux/db/{username}_transfer_progress.obj", mode="rb") as transfer_dump:
+            with open(f"/Flux/db/{my_username}_transfer_progress.obj", mode="rb") as transfer_dump:
                 transfer_dump.seek(0)
                 transfer_progress = pickle.load(transfer_dump)
                 logging.debug(
@@ -861,7 +897,7 @@ if __name__ == "__main__":
         receive_thread.start()
         send_thread.join()
     except (KeyboardInterrupt, EOFError, SystemExit):
-        with open(f"/Flux/db/{username}_transfer_progress.obj", mode="wb") as transfer_dump:
+        with open(f"/Flux/db/{my_username}_transfer_progress.obj", mode="wb") as transfer_dump:
             pickle.dump(transfer_progress, transfer_dump)
 
         sys.exit(0)
