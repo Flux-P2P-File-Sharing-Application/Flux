@@ -14,6 +14,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from utils.constants import FMT, HEADER_MSG_LEN, HEADER_TYPE_LEN, SERVER_RECV_PORT
 from utils.exceptions import ExceptionCode, RequestException
 from utils.helpers import update_file_hash
+from utils.socket_functions import recvall
 from utils.types import DBData, DirData, HeaderCode, Message, UpdateHashParams
 
 IP = socket.gethostbyname(socket.gethostname())
@@ -84,7 +85,7 @@ def receive_msg(client_socket: socket.socket) -> Message:
     else:
         # Receive message length and query data
         message_len = int(client_socket.recv(HEADER_MSG_LEN).decode(FMT))
-        query = client_socket.recv(message_len)
+        query = recvall(message_len)
         logging.debug(
             msg=f"Received packet: TYPE {message_type} LEN {message_len} QUERY query!r from {client_socket.getpeername()}"
         )
@@ -288,12 +289,10 @@ def read_handler(notified_socket: socket.socket) -> None:
                     if username is not None:
                         User = Query()
                         browse_files: list[DBData] = flux_db.search(User.uname != username)
-                        logging.debug(f"{browse_files}")
+                        # logging.debug(f"{browse_files}")
                         browse_files_bytes = msgpack.packb(browse_files)
-                        browse_files_header = f"{HeaderCode.FILE_SEARCH.value}{len(browse_files_bytes):<{HEADER_MSG_LEN}}".encode(
-                            FMT
-                        )
-                        notified_socket.send(browse_files_header + browse_files_bytes)
+                        browse_files_header = f"{HeaderCode.FILE_SEARCH.value}{len(browse_files_bytes):<{HEADER_MSG_LEN}}".encode(FMT)
+                        notified_socket.sendall(browse_files_header + browse_files_bytes)
                     else:
                         raise RequestException(
                             msg=f"Username does not exist",

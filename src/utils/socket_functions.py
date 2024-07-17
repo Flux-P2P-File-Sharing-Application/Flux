@@ -3,7 +3,7 @@ import socket
 import msgpack
 
 from utils.constants import FMT, HEADER_MSG_LEN, HEADER_TYPE_LEN
-from utils.exceptions import ExceptionCode, RequestException
+from utils.exceptions import RequestException
 from utils.types import HeaderCode
 
 def request_ip(uname: str, client_send_socket: socket.socket) -> str | None:
@@ -31,7 +31,7 @@ def request_ip(uname: str, client_send_socket: socket.socket) -> str | None:
         logging.error(f"Invalid message type in header: {res_type}")
         return None
     
-def recv_data(peer_socket: socket.socket, length: int) -> bytes:
+def recvall(peer_socket: socket.socket, length: int) -> bytes:
     received = 0
     data: bytes = b""
     while received != length:
@@ -40,6 +40,6 @@ def recv_data(peer_socket: socket.socket, length: int) -> bytes:
             break
         data += new_data
         received += len(new_data)
-    if received != length:
-        raise RequestException(msg="Data received is incomplete", code=ExceptionCode.INCOMPLETE)
+    # if received != length:
+    #     raise RequestException(msg="Data received is incomplete", code=ExceptionCode.INCOMPLETE)
     return data
