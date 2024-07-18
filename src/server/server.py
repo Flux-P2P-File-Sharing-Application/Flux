@@ -3,6 +3,7 @@ import select
 import socket
 import sys
 import os
+import time
 from pathlib import Path
 
 import msgpack
@@ -57,6 +58,8 @@ sockets_list = [server_socket]
 uname_to_ip: dict[str, str] = {}
 ip_to_uname: dict[str, str] = {}
 
+uname_to_status: dict[str, int] = {}
+
 
 def receive_msg(client_socket: socket.socket) -> Message:
     """
@@ -75,17 +78,20 @@ def receive_msg(client_socket: socket.socket) -> Message:
         HeaderCode.REQUEST_UNAME.value,
         HeaderCode.SHARE_DATA.value,
         HeaderCode.FILE_SEARCH.value,
+        HeaderCode.HEARTBEAT_REQUEST.value,     
     ]:
         # Handle invalid message type
         logging.error(msg=f"Received message type {message_type}")
         raise RequestException(
-            msg="Invalid message type in header",
+            msg=f"Invalid message type in header, rexeived: {message_type}",
             code=ExceptionCode.INVALID_HEADER,
         )
+    elif message_type == HeaderCode.HEARTBEAT_REQUEST.value:
+        return {"type": HeaderCode(message_type), "query": "online"}
     else:
         # Receive message length and query data
         message_len = int(client_socket.recv(HEADER_MSG_LEN).decode(FMT))
-        query = recvall(message_len)
+        query = recvall(client_socket, message_len)
         logging.debug(
             msg=f"Received packet: TYPE {message_type} LEN {message_len} QUERY query!r from {client_socket.getpeername()}"
         )
@@ -96,51 +102,17 @@ def read_handler(notified_socket: socket.socket) -> None:
     global sockets_list
     if notified_socket == server_socket:
         client_socket, client_addr = server_socket.accept()
-        try:
-            # userdata = receive_msg(client_socket)
-            # uname = userdata["query"].decode(FMT)
-            sockets_list.append(client_socket)
-            # if userdata["type"] == HeaderCode.NEW_CONNECTION:
-            #     addr = uname_to_ip.get(uname)
-            #     logging.debug(
-            #         msg=f"Registration request for username {uname} from address {client_addr}"
-            #     )
-            #     if addr is None:
-            #         uname_to_ip[uname] = client_addr[0]
-            #         ip_to_uname[client_addr[0]] = uname
-            #         logging.debug(
-            #             msg=(
-            #                 "Accepted new connection from"
-            #                 f" {client_addr[0]}:{client_addr[1]}"
-            #                 f" username: {userdata['query'].decode(FMT)}"
-            #             )
-            #         )
-            #         client_socket.send(f"{HeaderCode.NEW_CONNECTION.value}".encode(FMT))
-            #     else:
-            #         if addr != client_addr[0]:
-            #             raise RequestException(
-            #                 msg=f"User with username {addr} already exists",
-            #                 code=ExceptionCode.USER_EXISTS,
-            #             )
-            #         else:
-            #             raise RequestException(
-            #                 msg="Cannot re-register user for same address",
-            #                 code=ExceptionCode.BAD_REQUEST,
-            #             )
-            # else:
-            #     raise RequestException(
-            #         msg=f"Bad request from {client_addr}",
-            #         code=ExceptionCode.BAD_REQUEST,
-            #     )
-        except RequestException as e:
-            if e.code != ExceptionCode.DISCONNECT:
-                data: bytes = msgpack.packb(e, default=RequestException.to_dict, use_bin_type=True)
-                header = f"{HeaderCode.ERROR.value}{len(data):<{HEADER_MSG_LEN}}".encode(FMT)
-                client_socket.send(header + data)
-            uname = ip_to_uname.pop(client_addr[0], None)
-            uname_to_ip.pop(uname, None)
-            logging.error(msg=e.msg)
-            return
+        # try:
+        sockets_list.append(client_socket)
+        # except RequestException as e:
+        #     if e.code != ExceptionCode.DISCONNECT:
+        #         data: bytes = msgpack.packb(e, default=RequestException.to_dict, use_bin_type=True)
+        #         header = f"{HeaderCode.ERROR.value}{len(data):<{HEADER_MSG_LEN}}".encode(FMT)
+        #         client_socket.send(header + data)
+        #     uname = ip_to_uname.pop(client_addr[0], None)
+        #     uname_to_ip.pop(uname, None)
+        #     logging.error(msg=e.msg)
+        #     return
     else:
         try:
             request = receive_msg(notified_socket)
@@ -298,6 +270,23 @@ def read_handler(notified_socket: socket.socket) -> None:
                             msg=f"Username does not exist",
                             code=ExceptionCode.NOT_FOUND,
                         )
+
+                case HeaderCode.HEARTBEAT_REQUEST:
+                    username = ip_to_uname.get(notified_socket.getpeername()[0])
+                    if username is not None:
+                        uname_to_status[username] = time.time()
+                        data = msgpack.packb(uname_to_status)
+                        header = f"{HeaderCode.HEARTBEAT_REQUEST.value}{len(data):<{HEADER_MSG_LEN}}".encode(
+                            FMT
+                        )
+                        notified_socket.sendall(header + data)
+
+                    else:
+                        raise RequestException(
+                            msg=f"Username does not exist",
+                            code=ExceptionCode.NOT_FOUND,
+                        )
+                        
                 case _:
                     raise RequestException(
                         msg=f"Bad request from {notified_socket.getpeername()}",

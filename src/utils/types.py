@@ -6,12 +6,14 @@ class HeaderCode(Enum):
     FILE = "f"
     FILE_REQUEST = "F"
     FILE_SEARCH = "s"
+    HEARTBEAT_REQUEST = "H"
     REQUEST_UNAME = "R"
     MESSAGE = "m"
     NEW_CONNECTION = "n"
     REQUEST_IP = "r"
     SHARE_DATA = "d"
     UPDATE_HASH = "h"
+    UPDATE_SHARE_DATA = "D"
 
 class CompressionMethod(Enum):
     NONE = 0

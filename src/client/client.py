@@ -1,3 +1,4 @@
+import datetime
 import logging
 import os
 import re
@@ -11,6 +12,7 @@ import sys
 import msgpack
 import tqdm
 import pickle
+import time
 
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +32,8 @@ from utils.constants import (
     FMT,
     HEADER_MSG_LEN,
     HEADER_TYPE_LEN,
+    HEARTBEAT_TIMER,
+    ONLINE_TIMEOUT,
     RECV_FOLDER_PATH,
     SERVER_RECV_PORT,
     SHARE_FOLDER_PATH,
@@ -105,8 +109,28 @@ while True:
 client_recv_socket.listen(5)
 connected = [client_recv_socket]
 transfer_progress: dict[Path, TransferProgress] = {}
+uname_to_status: dict[str, int] = {}
 
 my_username = ""
+
+def send_heartbeat() -> None:
+    global client_send_socket
+    global uname_to_status
+    heartbeat = HeaderCode.HEARTBEAT_REQUEST.value.encode(FMT)
+    while True:
+        time.sleep(HEARTBEAT_TIMER)
+        client_send_socket.send(heartbeat)
+        type = client_send_socket.recv(HEADER_TYPE_LEN).decode(FMT)
+
+        if type == HeaderCode.HEARTBEAT_REQUEST.value:
+            length = int(client_send_socket.recv((HEADER_MSG_LEN)).decode(FMT))
+            uname_to_status = msgpack.unpackb(client_send_socket.recv(length))
+
+        else:
+            raise RequestException(
+                f"Server sent invalid message type in header: {type}",
+                ExceptionCode.INVALID_HEADER,
+            )
 
 def prompt_username() -> str:
     global my_username
@@ -265,7 +289,7 @@ def send_handler() -> None:
     global client_send_socket
     # with StdoutProxy(sleep_between_writes=0):
     mode_prompt: PromptSession = PromptSession(
-        "\nMODE: \n1. Browse files\n2. Send message\n3. Pause/resume downloads\n4. Exit\nEnter Mode: "
+        "\nMODE: \n1. Browse files\n2. Send message\n3. Pause/resume downloads\n4.View online peers\n5. Exit\nEnter Mode: "
     )
     recipient_prompt: PromptSession = PromptSession("Enter username: ")
     while True:
@@ -592,6 +616,18 @@ def send_handler() -> None:
                     else:
                         print("\nFile does not exist")
             case "4":
+                for uname, last_active in uname_to_status.items():
+                    if time.time() - last_active <= ONLINE_TIMEOUT:
+                        print(f"{uname}: Online")
+
+                    else:
+
+                        timestamp = time.localtime(last_active)
+                        print(
+                            f"{uname}: Offline (Last active : {time.strftime('%d-%m-%Y %H:%M:%S', timestamp)})"
+                        )
+
+            case _:                
                 if os.name == "nt":
                     os._exit(0)
                 else:
@@ -656,7 +692,7 @@ def send_file(
             total_bytes_read = 0
             file_to_send.seek(resume_offset)
             while total_bytes_read != filemetadata["size"] - resume_offset:
-                # time.sleep(0.05)
+                time.sleep(0.05)
                 bytes_read = file_to_send.read(FILE_BUFFER_LEN)
                 num_bytes = file_send_socket.send(bytes_read)
                 total_bytes_read += num_bytes
@@ -687,6 +723,7 @@ def send_file(
 
 
 def receive_msg(socket: socket.socket) -> str:
+    global client_send_socket    
     logging.debug(f"Receiving from {socket.getpeername()}")
     message_type = socket.recv(HEADER_TYPE_LEN).decode(FMT)
     if not len(message_type):
@@ -754,15 +791,27 @@ def receive_msg(socket: socket.socket) -> str:
                     )
                     send_file_thread.start()
                     return "File requested by user"
+                elif requested_file_path.is_dir():
+                    raise RequestException(
+                        f"Requested a directory, {file_req_header['filepath']} is not a file.",
+                        ExceptionCode.BAD_REQUEST,
+                    )                
                 else:
                     # TODO: Update file info on server
+                    share_data = msgpack.packb(path_to_dict(SHARE_FOLDER_PATH)["children"])
+                    share_data_header = (
+                        f"{HeaderCode.SHARE_DATA.value}{len(share_data):<{HEADER_MSG_LEN}}".encode(
+                            FMT
+                        )
+                    )
+                    client_send_socket.sendall(share_data_header + share_data)                    
                     raise RequestException(
                         f"Requested file {file_req_header['filepath']} is not available",
                         ExceptionCode.NOT_FOUND,
                     )
             case _:
                 message_len = int(socket.recv(HEADER_MSG_LEN).decode(FMT))
-                return recvall(message_len).decode(FMT)
+                return recvall(socket, message_len).decode(FMT)
 
 
 def receive_handler() -> None:
@@ -864,7 +913,7 @@ if __name__ == "__main__":
             client_send_socket.sendall(share_data_header + share_data)
             try:
                 with open(
-                    f"/Drizzle/db/{my_username}_transfer_progress.obj", mode="rb"
+                    f"/Flux/db/{my_username}_transfer_progress.obj", mode="rb"
                 ) as transfer_dump:
                     transfer_dump.seek(0)
                     transfer_progress = pickle.load(transfer_dump)
@@ -879,12 +928,15 @@ if __name__ == "__main__":
             threading.excepthook = excepthook
             send_thread = threading.Thread(target=send_handler)
             receive_thread = threading.Thread(target=receive_handler)
+            heartbeat_thread = threading.Thread(target=send_heartbeat)
+            
             send_thread.start()
-            receive_thread.start()
+            receive_thread.start()            
+            heartbeat_thread.start()
             send_thread.join()
         except (KeyboardInterrupt, EOFError, SystemExit):
             with open(
-                f"/Drizzle/db/{my_username}_transfer_progress.obj", mode="wb"
+                f"/Flux/db/{my_username}_transfer_progress.obj", mode="wb"
             ) as transfer_dump:
                 pickle.dump(transfer_progress, transfer_dump)
             sys.exit(0)
