@@ -1,18 +1,307 @@
-# -*- coding: utf-8 -*-
+# Imports (standard libraries)
+import hashlib
+import logging
+import os
+import pickle
+import select
+import shutil
+import socket
+import sys
+import time
+from datetime import datetime
+from io import BufferedReader
+from pathlib import Path
+from pprint import pformat
 
-################################################################################
-## Form generated from reading UI file 'FluxMainWindow.ui'
-##
-## Created by: Qt User Interface Compiler version 5.15.2
-##
-## WARNING! All changes made in this file will be lost when recompiling UI file!
-################################################################################
+# Imports (PyPI)
+import msgpack
+from notifypy import Notify
+from PyQt5.QtCore import (
+    QCoreApplication,
+    QMetaObject,
+    QMutex,
+    QObject,
+    QRect,
+    QRunnable,
+    QSize,
+    Qt,
+    QThread,
+    QThreadPool,
+    pyqtSignal,
+)
+from PyQt5.QtGui import QFont, QIcon
+from PyQt5.QtWidgets import (
+    QAbstractItemView,
+    QDialog,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLayout,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpacerItem,
+    QTextEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
-from PySide2.QtCore import *
-from PySide2.QtGui import *
-from PySide2.QtWidgets import *
+# Imports (UI components)
+from ui.ErrorDialog import Ui_ErrorDialog
+from ui.FileInfoDialog import Ui_FileInfoDialog
+from ui.FileProgressWidget import Ui_FileProgressWidget
+from ui.FileSearchDialog import Ui_FileSearchDialog
+from ui.SettingsDialog import Ui_SettingsDialog
 
-# import userstatus_rc
+# Imports (utilities)
+sys.path.append("../")
+from client.app import MainWindow
+from utils.constants import (
+    CLIENT_RECV_PORT,
+    CLIENT_SEND_PORT,
+    FILE_BUFFER_LEN,
+    FMT,
+    HEADER_MSG_LEN,
+    HEADER_TYPE_LEN,
+    HEARTBEAT_TIMER,
+    LEADING_HTML,
+    ONLINE_TIMEOUT,
+    SERVER_RECV_PORT,
+    TEMP_FOLDER_PATH,
+    TRAILING_HTML,
+)
+from utils.exceptions import ExceptionCode, RequestException
+from utils.helpers import (
+    construct_message_html,
+    convert_size,
+    generate_transfer_progress,
+    get_directory_size,
+    get_file_hash,
+    get_files_in_dir,
+    get_unique_filename,
+    import_file_to_share,
+    path_to_dict,
+)
+from utils.socket_functions import get_self_ip, recvall, request_ip, request_uname, update_share_data
+from utils.types import (
+    CompressionMethod,
+    DBData,
+    DirData,
+    DirProgress,
+    FileMetadata,
+    FileRequest,
+    HeaderCode,
+    ItemSearchResult,
+    Message,
+    ProgressBarData,
+    TransferProgress,
+    TransferStatus,
+    UpdateHashParams,
+    UserSettings,
+)
+
+# Global constants
+SERVER_IP = ""
+SERVER_ADDR = ()
+CLIENT_IP = get_self_ip()
+
+# Logging configuration
+logging.basicConfig(
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    level=logging.DEBUG,
+    handlers=[
+        logging.FileHandler(
+            f"{str(Path.home())}/.Flux/logs/client_{datetime.now().strftime('%d-%m-%Y_%H-%M-%S')}.log"
+        ),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+# socket to connect to main server
+client_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# socket to receive new connections from peers
+client_recv_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+# Configuring socket options to reuse addresses and immediately transmit data
+client_send_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+client_recv_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+client_send_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+client_recv_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+# Binding sockets
+client_send_socket.bind((CLIENT_IP, CLIENT_SEND_PORT))
+client_recv_socket.bind((CLIENT_IP, CLIENT_RECV_PORT))
+
+# Make client receive socket listen for new connections
+client_recv_socket.listen(5)
+
+# Global variables
+
+# List of peer sockets connected to the clients
+connected = [client_recv_socket]
+# Mapping from username to last seen timestamp
+uname_to_status: dict[str, int] = {}
+# Mapping from username to list of messages
+messages_store: dict[str, list[Message]] = {}
+# Username selected by the user in the list
+selected_uname: str = ""
+# List of file items chosen by the user for downloading
+selected_file_items: list[DirData] = []
+# The user's own username
+self_uname: str = ""
+# Mapping from file path to download status and progress
+transfer_progress: dict[Path, TransferProgress] = {}
+# Mapping from file path to progress bar displaying its status
+progress_widgets: dict[Path, Ui_FileProgressWidget] = {}
+# Mapping from directory path to cumulative download status and progress
+dir_progress: dict[Path, DirProgress] = {}
+# The settings of the current session
+user_settings: UserSettings = {}
+# Cache to lookup username of a given IP
+uname_to_ip: dict[str, str] = {}
+# Cache to lookup IP of a given username
+ip_to_uname: dict[str, str] = {}
+# Whether or not an error dialog is already open on the screen currently
+error_dialog_is_open = False
+# A mutex to prevent race conditions while sending data to the server socket from different threads
+server_socket_mutex = QMutex()
+
+
+def show_error_dialog(error_msg: str, show_settings: bool = False) -> None:
+    """Displays an error dialog with the given message
+    Parameters
+    ----------
+    error_msg : str
+        The error message to be displayed in the dialog
+    show_settings : bool, optional
+        A flag used to indicate whether or not to display the settings button (default is False)
+    """
+
+    global user_settings
+    global error_dialog_is_open
+
+    error_dialog = QDialog()
+    error_dialog.ui = Ui_ErrorDialog(error_dialog, error_msg, user_settings if show_settings else None)
+
+    # Don't display dialog if another dialog is already open
+    if not error_dialog_is_open:
+        error_dialog_is_open = True
+        error_dialog.exec()
+        error_dialog_is_open = False
+
+
+class SaveProgressWorker(QObject):
+    """A worker that periodically saves the download progress and statuses to a file
+    Methods
+    -------
+    dump_progress_data()
+        Stores the current download progress and statuses of all files and folders to a file
+    run()
+        Runs the dump_progress_data function every 10 seconds
+    """
+
+    def dump_progress_data(self) -> None:
+        """Pickles the transfer_progress, dir_progress and progress_widgets dictionaries into 3 files"""
+        global transfer_progress
+        global dir_progress
+        global progress_widgets
+
+        for path in transfer_progress.keys():
+            if transfer_progress[path]["status"] in [
+                TransferStatus.DOWNLOADING,
+                TransferStatus.NEVER_STARTED,
+            ]:
+                transfer_progress[path]["status"] = TransferStatus.PAUSED
+
+        # Pickle the transfer_progress dictionary
+        with (Path.home() / ".Flux/db/transfer_progress.pkl").open(mode="wb") as transfer_progress_dump:
+            logging.debug(msg="Created transfer progress dump")
+            pickle.dump(transfer_progress, transfer_progress_dump)
+
+        # Pickle the dir_progress dictionary
+        with (Path.home() / ".Flux/db/dir_progress.pkl").open(mode="wb") as dir_progress_dump:
+            logging.debug(msg="Created dir progress dump")
+            dir_progress_writeable: dict[Path, DirProgress] = {}
+            for path in dir_progress.keys():
+                dir_progress[path]["mutex"].lock()
+                dir_progress_writeable[path] = {
+                    "current": dir_progress[path]["current"],
+                    "total": dir_progress[path]["total"],
+                    "status": dir_progress[path]["status"],
+                }
+                dir_progress[path]["mutex"].unlock()
+            pickle.dump(dir_progress_writeable, dir_progress_dump)
+
+        # Pickle the progress_widgets dictionary
+        with (Path.home() / ".Flux/db/progress_widgets.pkl").open(mode="wb") as progress_widgets_dump:
+            progress_widgets_writeable: dict[Path, ProgressBarData] = {}
+            for path, widget in progress_widgets.items():
+                progress_widgets_writeable[path] = {
+                    "current": widget.ui.progressBar.value(),
+                    "total": widget.ui.total,
+                }
+            pickle.dump(progress_widgets_writeable, progress_widgets_dump)
+
+    def run(self):
+        """Runs the dump_progress_data periodically"""
+        global transfer_progress
+        global dir_progress
+        global progress_widgets
+
+        # Save the progress data every 10 seconds
+        while True:
+            self.dump_progress_data()
+            time.sleep(10)
+
+
+class HeartbeatWorker(QObject):
+    """A worker that periodically sends heartbeat messages to the server
+    Attributes
+    ----------
+    update_status : pyqtSignal
+        A signal that is emitted every time new status data is obtained from the server
+    Methods
+    -------
+    run()
+        Sends heartbeat messages to the server periodically, every HEARTBEAT_TIMER seconds
+    """
+
+    update_status = pyqtSignal(dict)
+
+    def run(self):
+        """Sends a heartbeat message to the server every HEARTBEAT_TIMER seconds and updates the statuses of all users"""
+        global client_send_socket
+        global server_socket_mutex
+
+        # Encode and send the heartbeat message
+        heartbeat = HeaderCode.HEARTBEAT_REQUEST.value.encode(FMT)
+        while True:
+            server_socket_mutex.lock()
+            client_send_socket.send(heartbeat)
+            type = client_send_socket.recv(HEADER_TYPE_LEN).decode(FMT)
+            if type == HeaderCode.HEARTBEAT_REQUEST.value:
+                # Receive updated user statuses from the server and emit the update_status signal
+                length = int(client_send_socket.recv((HEADER_MSG_LEN)).decode(FMT))
+                new_status = msgpack.unpackb(client_send_socket.recv(length))
+                server_socket_mutex.unlock()
+                self.update_status.emit(new_status)
+                time.sleep(HEARTBEAT_TIMER)
+            else:
+                server_socket_mutex.unlock()
+                logging.error(
+                    f"Server sent invalid message type in header: {type}",
+                )
+                sys.exit(
+                    show_error_dialog(
+                        "An error occurred while communicating with the server.\nTry reconnecting or check the server logs.",
+                        True,
+                    )
+                )
 
 
 class Ui_FluxMainWindow(object):
