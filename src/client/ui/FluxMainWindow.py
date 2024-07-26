@@ -304,6 +304,209 @@ class HeartbeatWorker(QObject):
                 )
 
 
+class ReceiveDirectTransferWorker(QRunnable):
+    """A worker that receives files sent via Direct Transfer from a peer
+    Attributes
+    ----------
+    metadata : FileMetadata
+        The metadata of the file to be downloaded
+    sender : str
+        The username of the sender
+    file_receive_socket : socket.socket
+        The socket on which to receive the file
+    Methods
+    -------
+    run()
+        Receives the file from the sender on the file_receive_socket socket
+    """
+
+    def __init__(self, metadata: FileMetadata, sender: str, file_receive_socket: socket.socket):
+        super().__init__()
+        logging.debug("file recv worker init")
+        self.metadata = metadata
+        self.sender = sender
+        self.file_recv_socket = file_receive_socket
+        self.signals = Signals()
+
+    def run(self):
+        """Receives the file with the given metadata from the sender on the file_receive_socket socket"""
+        global user_settings
+        global transfer_progress
+
+        try:
+            # Accept connection from the sender
+            sender, _ = self.file_recv_socket.accept()
+            # Temporary path to write the file to while the download is not complete
+            temp_path: Path = TEMP_FOLDER_PATH / self.sender / self.metadata["path"]
+            # Final download path in the user's download folder to move the file to after the download is complete
+            final_download_path: Path = get_unique_filename(
+                Path(user_settings["downloads_folder_path"]) / self.sender / self.metadata["path"],
+            )
+            temp_path.parent.mkdir(parents=True, exist_ok=True)
+            final_download_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Initialize transfer progress with default values
+            transfer_progress[temp_path] = {
+                "status": TransferStatus.DOWNLOADING,
+                "progress": 0,
+                "percent_progress": 0.0,
+            }
+
+            logging.debug(msg="Obtaining file")
+            # Check if there is sufficient disk space available to receive the file
+            if shutil.disk_usage(user_settings["downloads_folder_path"]).free > self.metadata["size"]:
+                with temp_path.open(mode="wb") as file_to_write:
+                    byte_count = 0
+                    hash = hashlib.sha1()
+                    self.signals.receiving_new_file.emit((temp_path, self.metadata["size"]))
+                    while True:
+                        logging.debug(msg="Obtaining file chunk")
+
+                        # Receive a file chunk
+                        file_bytes_read: bytes = sender.recv(FILE_BUFFER_LEN)
+
+                        # Update cumulative file hash
+                        hash.update(file_bytes_read)
+                        num_bytes_read = len(file_bytes_read)
+                        byte_count += num_bytes_read
+                        transfer_progress[temp_path]["progress"] = byte_count
+
+                        # Write chunk to temp file
+                        file_to_write.write(file_bytes_read)
+
+                        # Emit a signal to update the progress bar
+                        self.signals.file_progress_update.emit(temp_path)
+
+                        # If there are no more chunks being sent, terminate the transfer
+                        if num_bytes_read == 0:
+                            break
+
+                    received_hash = hash.hexdigest()
+                    # Compare hash of received file with hash given in the metadata
+                    if received_hash == self.metadata["hash"]:
+                        transfer_progress[temp_path]["status"] = TransferStatus.COMPLETED
+                        final_download_path.parent.mkdir(parents=True, exist_ok=True)
+
+                        # Move the file to the final download path in the user's download folder
+                        shutil.move(temp_path, final_download_path)
+                        print("Succesfully received 1 file")
+
+                        # Emit a signal to delete the progress bar
+                        self.signals.file_download_complete.emit(temp_path)
+                        del transfer_progress[temp_path]
+                    else:
+                        transfer_progress[temp_path]["status"] = TransferStatus.FAILED
+                        logging.error(msg=f"Failed integrity check for file {self.metadata['path']}")
+                        show_error_dialog(f"Failed integrity check for file {self.metadata['path']}.")
+        except Exception as e:
+            logging.exception(msg=f"Failed to receive file: {e}")
+            show_error_dialog(f"Failed to receive file:\n{e}")
+        finally:
+            # Close the connection with the sender
+            self.file_recv_socket.close()
+
+
+class HandleFileRequestWorker(QRunnable):
+    """A worker that handles incoming requests to download files from other peers
+    Attributes
+    ----------
+    filepath : Path
+        The path to the file to be downloaded
+    requester : tuple[str, int]
+        The address of the requester, specified of a tuple of IP address and port number
+    request_hash : bool
+        Whether or not to send the hash of the file to the peer and the server
+    resume_offset : int
+        Number of bytes of offset to send the file from
+    Methods
+    -------
+    run()
+        Sends the requested file at the filepath to the requester
+    """
+
+    def __init__(self, filepath: Path, requester: tuple[str, int], request_hash: bool, resume_offset: int):
+        super().__init__()
+        self.filepath = filepath
+        self.requester = requester
+        self.request_hash = request_hash
+        self.resume_offset = resume_offset
+
+    def run(self) -> None:
+        """Send the file at filepath if it exists to the requester at the given address after opening a new port"""
+
+        # Open a new socket for sending the file
+        file_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        file_send_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        try:
+            # Attempt to connect to the requester at the given address
+            file_send_socket.connect(self.requester)
+        except Exception as e:
+            logging.exception(f"Exception when sending file: {e}")
+            return
+        try:
+            hash = ""
+
+            # If request_hash is set, compute the hash of the file before sending it
+            if self.request_hash:
+                hash = get_file_hash(str(self.filepath))
+
+            # Create the file metadata, encode it and send it to the requester
+            filemetadata: FileMetadata = {
+                "path": str(self.filepath).removeprefix(user_settings["share_folder_path"] + "/"),
+                "size": self.filepath.stat().st_size,
+                "hash": hash if self.request_hash else None,
+            }
+
+            logging.debug(filemetadata)
+            filemetadata_bytes = msgpack.packb(filemetadata)
+            filesend_header = f"{HeaderCode.DIRECT_TRANSFER.value}{len(filemetadata_bytes):<{HEADER_MSG_LEN}}".encode(
+                FMT
+            )
+
+            with self.filepath.open(mode="rb") as file_to_send:
+                logging.debug(f"Sending file {filemetadata['path']} to {self.requester}")
+                # Send the file metadata to the requester
+                file_send_socket.send(filesend_header + filemetadata_bytes)
+
+                total_bytes_read = 0
+
+                if os.name == "posix":
+                    # On Unix-like systems use the high-performance socket.sendfile function with the resume_offset
+                    file_send_socket.sendfile(file_to_send, self.resume_offset)
+                else:
+                    # On other systems
+                    # Seek to the point in the file after the resume_offset
+                    file_to_send.seek(self.resume_offset)
+
+                    # Send file chunks until the whole file is sent
+                    while total_bytes_read != filemetadata["size"] - self.resume_offset:
+                        bytes_read = file_to_send.read(FILE_BUFFER_LEN)
+                        num_bytes = file_send_socket.send(bytes_read)
+                        total_bytes_read += num_bytes
+                print("\nFile Sent")
+            if self.request_hash:
+                # If the requester set the request_hash option, the server does not have the hash of the file
+                # so send the updated hash to the server
+                update_hash_params: UpdateHashParams = {
+                    "filepath": str(self.filepath).removeprefix(user_settings["share_folder_path"] + "/"),
+                    "hash": hash,
+                }
+                update_hash_bytes = msgpack.packb(update_hash_params)
+                update_hash_header = f"{HeaderCode.UPDATE_HASH.value}{len(update_hash_bytes):<{HEADER_MSG_LEN}}".encode(
+                    FMT
+                )
+                server_socket_mutex.lock()
+                client_send_socket.send(update_hash_header + update_hash_bytes)
+                server_socket_mutex.unlock()
+        except Exception as e:
+            logging.exception(f"File Sending failed: {e}")
+            show_error_dialog(f"File Sending failed.\n{e}")
+        finally:
+            file_send_socket.close()
+            
+
+
+
 class Ui_FluxMainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
