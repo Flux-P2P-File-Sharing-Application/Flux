@@ -5,9 +5,10 @@ name = "pypi"
 
 [packages]
 msgpack = "*"
-prompt-toolkit = "*"
-tqdm = "*"
 tinydb = "*"
+prompt-toolkit = "*"
+fuzzysearch = "*"
+thefuzz = "*"
 
 [dev-packages]
 black = "*"
