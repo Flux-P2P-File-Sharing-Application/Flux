@@ -1,0 +1,36 @@
+services:
+  server:
+    build:
+      context: ./src/
+      dockerfile: server.dockerfile
+    ports:
+      - "1234:1234"
+    network_mode: host
+    volumes:
+      - ./logs:/logs:rw
+      - ./db:/Flux/db:rw
+
+  client:
+    build:
+      context: ./src/
+      dockerfile: client.dockerfile
+    ports:
+      - "1234:1234"
+      - "4321:4321"
+    network_mode: host
+    stdin_open: true # docker run -i
+    tty: true        # docker run -t
+    volumes:
+      - ./logs:/logs:rw
+      - ./downloads:/Flux/downloads:rw
+      - ./tmp:/Flux/tmp:rw
+      - ./db:/Flux/db:rw
+    environment:
+      - DISPLAY
+
+networks:
+  # lan:
+  #   name: lan
+  #   driver: bridge
+  default:
+    name: host

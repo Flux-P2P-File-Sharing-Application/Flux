@@ -88,7 +88,7 @@ class Ui_ErrorDialog(QDialog):
         QMetaObject.connectSlotsByName(Dialog)
 
     def retranslateUi(self, Dialog):
-        Dialog.setWindowTitle(QCoreApplication.translate("Dialog", "Drizzle: An error occurred", None))
+        Dialog.setWindowTitle(QCoreApplication.translate("Dialog", "Flux: An error occurred", None))
         self.label.setText(QCoreApplication.translate("Dialog", "An error occurred", None))
         self.label_2.setText(
             QCoreApplication.translate(
