@@ -879,6 +879,700 @@ class Signals(QObject):
     start_download = pyqtSignal(dict)
 
 
+class RequestFileWorker(QRunnable):
+    """A worker that requests files or directories to be downloaded from the selected peer
+    Attributes
+    ----------
+    file_item : DirData
+        The metadata of the file item to be requested
+    peer_ip : str
+        The IP of the sender to request the file from
+    sender : str
+        The username of the sender
+    parent_dir : Path | None
+        In case of a directory download, the path of the parent directory to which the file_item belongs
+    Methods
+    ----------
+    run()
+        Requests the file item from the sender
+    """
+
+    def __init__(self, file_item: DirData, peer_ip: str, sender: str, parent_dir: Path | None) -> None:
+        super().__init__()
+        self.file_item = file_item
+        self.peer_ip = peer_ip
+        self.sender = sender
+        self.parent_dir = parent_dir
+        self.signals = Signals()
+
+        logging.debug(msg=f"Thread worker for requesting {sender}/{file_item['name']}")
+
+    def run(self) -> None:
+        """Requests the file_item from the sender at peer_ip
+        Raises
+        ----------
+        RequestException
+            In case of any errors that occur during the transfer
+        """
+
+        global transfer_progress
+        global user_settings
+
+        try:
+            # Open a new socket to request the file and connect to the sender
+            self.client_peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client_peer_socket.connect((self.peer_ip, CLIENT_RECV_PORT))
+
+            # Open a new socket to listen for the incoming file transfer from the sender
+            file_recv_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            file_recv_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            file_recv_socket.bind((CLIENT_IP, 0))
+            file_recv_socket.listen()
+
+            # Get the port of the file receive socket to send to the sender
+            file_recv_port = file_recv_socket.getsockname()[1]
+
+            offset = 0
+            temp_path = TEMP_FOLDER_PATH / self.sender / self.file_item["path"]
+            logging.debug(f"Using temp path {str(temp_path)}")
+            # Check if an incomplete download already exists at the temp path (in case of resuming downloads)
+            if temp_path.exists():
+                # If such a file exists, then request an offset of the number of bytes already downloaded
+                offset = temp_path.stat().st_size
+
+            logging.debug(f"Offset of {offset} bytes")
+
+            # Optimization for small files
+            # If a file can be transmitted in a single packet (<=16 kB) then don't request the hash
+            is_tiny_file = self.file_item["size"] <= FILE_BUFFER_LEN
+
+            # Don't request the hash if it is already available or is a small file
+            request_hash = self.file_item["hash"] is None and not is_tiny_file
+            file_request: FileRequest = {
+                "port": file_recv_port,
+                "filepath": self.file_item["path"],
+                "request_hash": request_hash,
+                "resume_offset": offset,
+            }
+
+            file_req_bytes = msgpack.packb(file_request)
+            file_req_header = f"{HeaderCode.FILE_REQUEST.value}{len(file_req_bytes):<{HEADER_MSG_LEN}}".encode(FMT)
+
+            # Send the file request to the sender
+            self.client_peer_socket.send(file_req_header + file_req_bytes)
+            res_type = self.client_peer_socket.recv(HEADER_TYPE_LEN).decode(FMT)
+            logging.debug(f"received header type {res_type} from sender")
+            match res_type:
+                # If the sender has the file
+                case HeaderCode.FILE_REQUEST.value:
+                    # Accept the new connection from the sender on the file receive port
+                    sender, _ = file_recv_socket.accept()
+                    logging.debug(msg=f"Sender tried to connect: {sender.getpeername()}")
+                    res_type = sender.recv(HEADER_TYPE_LEN).decode(FMT)
+                    if res_type == HeaderCode.DIRECT_TRANSFER.value:
+                        file_header_len = int(sender.recv(HEADER_MSG_LEN).decode(FMT))
+                        file_header: FileMetadata = msgpack.unpackb(sender.recv(file_header_len))
+                        logging.debug(msg=f"receiving file with metadata {file_header}")
+
+                        # Check if sufficient free disk space is available to receive the file
+                        if shutil.disk_usage(user_settings["downloads_folder_path"]).free > file_header["size"]:
+                            # Final path in the user's download folder to move the file to after downloading
+                            final_download_path: Path = get_unique_filename(
+                                Path(user_settings["downloads_folder_path"]) / file_header["path"],
+                            )
+                            try:
+                                temp_path.parent.mkdir(parents=True, exist_ok=True)
+                                file_to_write = temp_path.open("ab")
+                                logging.debug(f"Creating and writing to {temp_path}")
+                                try:
+                                    byte_count = 0
+                                    hash = hashlib.sha1()
+                                    # Initialize the transfer progress of the file item
+                                    if transfer_progress.get(temp_path) is None:
+                                        transfer_progress[temp_path] = {}
+
+                                    # If the download is not paused, set the status to DOWNLOADING
+                                    if (
+                                        transfer_progress[temp_path].get("status", TransferStatus.NEVER_STARTED)
+                                        != TransferStatus.PAUSED
+                                    ):
+                                        transfer_progress[temp_path]["status"] = TransferStatus.DOWNLOADING
+
+                                    # If the offset was 0 (i.e. new download) or if a progress bar was not created
+                                    # then emit the receiving_new_file signal to create a progress bar
+                                    if offset == 0 or progress_widgets.get(temp_path) is None:
+                                        if self.parent_dir is None:
+                                            self.signals.receiving_new_file.emit((temp_path, file_header["size"]))
+
+                                    # Keep receiving file chunks until no more chunks are received
+                                    # or if the transfer is paused
+                                    while True:
+                                        if transfer_progress[temp_path]["status"] == TransferStatus.PAUSED:
+                                            # If the transfer is paused, close the file and socket
+                                            file_to_write.close()
+                                            file_recv_socket.close()
+                                            return
+
+                                        # Receive a file chunk
+                                        file_bytes_read: bytes = sender.recv(FILE_BUFFER_LEN)
+
+                                        # Compute the hash if it is a new download and if it is not a small file
+                                        if not offset and not is_tiny_file:
+                                            hash.update(file_bytes_read)
+
+                                        num_bytes_read = len(file_bytes_read)
+                                        byte_count += num_bytes_read
+
+                                        # Update the file progress
+                                        transfer_progress[temp_path]["progress"] = byte_count + offset
+
+                                        file_to_write.write(file_bytes_read)
+
+                                        # If it is a file download, emit the file_progress_update signal
+                                        if self.parent_dir is None:
+                                            self.signals.file_progress_update.emit(temp_path)
+
+                                        # Otherwise, emit the dir_progress_update signal
+                                        else:
+                                            self.signals.dir_progress_update.emit((self.parent_dir, num_bytes_read))
+                                        if num_bytes_read == 0:
+                                            break
+
+                                    hash_str = ""
+                                    # If this download was resumed, compute the hash from the start of the file
+                                    if offset:
+                                        file_to_write.seek(0)
+                                        hash_str = get_file_hash(str(temp_path))
+                                    file_to_write.close()
+
+                                    # Check if the hashes received from the server (or sender) match
+                                    received_hash = hash.hexdigest() if not offset else hash_str
+                                    if (
+                                        is_tiny_file
+                                        or (request_hash and received_hash == file_header["hash"])
+                                        or (received_hash == self.file_item["hash"])
+                                    ):
+                                        # Change the status of this download to COMPLETED
+                                        transfer_progress[temp_path]["status"] = TransferStatus.COMPLETED
+
+                                        # Move the file into the user's download folder
+                                        final_download_path.parent.mkdir(parents=True, exist_ok=True)
+                                        shutil.move(temp_path, final_download_path)
+                                        print("Succesfully received 1 file")
+
+                                        # Emit the file_download_complete signal to delete the progress bar
+                                        self.signals.file_download_complete.emit(temp_path)
+                                        del transfer_progress[temp_path]
+                                    else:
+                                        transfer_progress[temp_path]["status"] = TransferStatus.FAILED
+                                        logging.error(msg=f"Failed integrity check for file {file_header['path']}")
+                                        show_error_dialog(
+                                            f"Failed integrity check for\
+                                            file {file_header['path']}.\nTry downloading it again."
+                                        )
+                                except Exception as e:
+                                    logging.exception(e)
+                                    show_error_dialog(f"File received but failed to save.\n{e}")
+                            except Exception as e:
+                                logging.exception(e)
+                                show_error_dialog("Unable to write file.\n{e}")
+                        else:
+                            logging.error(
+                                msg=f"Not enough space to receive file {file_header['path']}, {file_header['size']}"
+                            )
+                            show_error_dialog(
+                                f"Insufficient storage. You need at\
+                                least {convert_size(file_header['size'])} of space to receive {file_header['path']}.",
+                                True,
+                            )
+                    else:
+                        raise RequestException(
+                            f"Sender sent invalid message type in header: {res_type}",
+                            ExceptionCode.INVALID_HEADER,
+                        )
+                case HeaderCode.ERROR.value:
+                    # Receive the exception from the sender and raise it
+                    res_len = int(self.client_peer_socket.recv(HEADER_MSG_LEN).decode(FMT).strip())
+                    res = self.client_peer_socket.recv(res_len)
+                    err: RequestException = msgpack.unpackb(
+                        res,
+                        object_hook=RequestException.from_dict,
+                        raw=False,
+                    )
+                    raise err
+                case _:
+                    err = RequestException(
+                        f"Invalid message type in header: {res_type}",
+                        ExceptionCode.INVALID_HEADER,
+                    )
+                    raise err
+        except Exception as e:
+            logging.exception(e)
+            show_error_dialog(f"Error occurred when requesting file.\n{e}")
+        finally:
+            # Close the socket
+            self.client_peer_socket.close()
+
+
+class Ui_FluxMainWindow(QWidget):
+    """A worker that requests files or directories to be downloaded from the selected peer
+    Attributes
+    ----------
+    MainWindow : MainWindow
+        The application's main window instance
+    Methods
+    ----------
+    dump_progress_data()
+        Saves the progress data to disk when the application is closed
+    send_message()
+        Sends a message to the selected user
+    closeEvent(event) (Overriden)
+        Closes the heartbeat thread before exiting the application
+    render_file_tree(share: list[DirData] | None, parent: QTreeWidgetItem)
+        Populates the file tree widget with data of the share data file tree of the selected user
+    on_file_item_selected()
+        Updates the information label and download button with the selected file items
+    download_files()
+        Starts threads to download the selected files
+    messages_controller(message: Message)
+        Updates the message area with a new message
+    render_messages(messages_list: list[Message])
+        Renders all the messages in the message area
+    update_online_status(new_status: dict[str, int])
+        Updates the last seen statuses of users
+    on_user_selection_changed()
+        Updates the file tree and message area with the data of the new selected user
+    setupUi(MainWindow: MainWindow)
+        Sets up the initial UI, performs application initialization steps
+    retranslateUi(MainWindow: MainWindow)
+        Sets text on labels and buttons, sets options for components
+    open_settings(MainWindow: MainWindow)
+        Opens up the settings dialog
+    open_file_info(MainWindow: MainWindow)
+        Opens the file info dialog
+    import_files()
+        Opens the file picker to import files into the share folder
+    import_folder()
+        Opens the file picker to import folders into the share folder
+    share_file()
+        Opens the file picker to select files to send via Direct Transfer
+    pause_download(path: Path)
+        Pauses the download of a file
+    resume_download(path: Path)
+        Resumes the download of a file
+    remove_progress_widget(path: Path)
+        Remove the progress bar corresponding to a file download
+    new_file_progress(data: tuple[Path, int])
+        Create a new progress bar for a file download
+    update_file_progress(path: Path)
+        Updates the progress bar with the latest progress of the file download
+    update_dir_progress(progress_data: tuple[Path, int])
+        Updates the progress bar with the latest progress of the directory download
+    direct_transfer_controller(data: tuple[FileMetadata, socket.socket])
+        Opens a dialog asking the user to accept or reject an incoming Direct Transfer request
+    direct_transfer_accept(metadata: FileMetadata, sender: str, peer_socket: socket.socket)
+        Accepts the Direct Transfer request and opens a new socket to receive the file
+    direct_transfer_reject(peer_socket: socket.socket)
+        Rejects the Direct Transfer request
+    open_global_search(MainWindow: MainWindow)
+        Opens the file search dialog
+    download_from_global_search(item: ItemSearchResult)
+        Downloads the selected item from the search dialog
+    """
+
+    global client_send_socket
+    global client_recv_socket
+    global uname_to_status
+
+    def __init__(self, MainWindow: MainWindow):
+        self.MainWindow = MainWindow
+        super(Ui_FluxMainWindow, self).__init__()
+        try:
+            global user_settings
+            global dir_progress
+            global transfer_progress
+            global progress_widgets
+
+            self.user_settings = MainWindow.user_settings
+            self.signals = Signals()
+
+            # Connect signals
+            self.signals.pause_download.connect(self.pause_download)
+            self.signals.resume_download.connect(self.resume_download)
+
+            user_settings = MainWindow.user_settings
+            try:
+                # Load pickled transfer progress if it exists
+                with (Path.home() / ".Flux/db/transfer_progress.pkl").open(mode="rb") as transfer_progress_dump:
+                    transfer_progress_dump.seek(0)
+                    transfer_progress = pickle.load(transfer_progress_dump)
+            except Exception as e:
+                # Generate the transfer progress if no pickle was created
+                logging.error(msg=f"Failed to load transfer progress from dump: {e}")
+                transfer_progress = generate_transfer_progress()
+                logging.debug(msg=f"Transfer Progress generated\n{pformat(transfer_progress)}")
+            try:
+                # Load pickled dir_progress if it exists
+                with (Path.home() / ".Flux/db/dir_progress.pkl").open(mode="rb") as dir_progress_dump:
+                    dir_progress_dump.seek(0)
+                    dir_progress_readable: dict[Path, DirProgress] = pickle.load(dir_progress_dump)
+                    for path, data in dir_progress_readable.items():
+                        dir_progress[path] = data
+                        dir_progress[path]["mutex"] = QMutex()
+                    logging.debug(msg=f"Dir progress loaded from dump\n{pformat(dir_progress)}")
+            except Exception as e:
+                # TODO: Generate transfer progress for directories
+                logging.error(msg=f"Failed to load dir progress from dump: {e}")
+
+            # Connect to the server given in the settings
+            SERVER_IP = self.user_settings["server_ip"]
+            SERVER_ADDR = (SERVER_IP, SERVER_RECV_PORT)
+            client_send_socket.settimeout(10)
+            client_send_socket.connect(SERVER_ADDR)
+            client_send_socket.settimeout(None)
+
+            # Attempt to register the chosen username
+            self_uname = self.user_settings["uname"]
+            username = self_uname.encode(FMT)
+            username_header = f"{HeaderCode.NEW_CONNECTION.value}{len(username):<{HEADER_MSG_LEN}}".encode(FMT)
+            client_send_socket.send(username_header + username)
+            type = client_send_socket.recv(HEADER_TYPE_LEN).decode(FMT)
+            if type != HeaderCode.NEW_CONNECTION.value:
+                # If the registration fails, receive the error
+                error_len = int(client_send_socket.recv(HEADER_MSG_LEN).decode(FMT).strip())
+                error = client_send_socket.recv(error_len)
+                exception: RequestException = msgpack.unpackb(error, object_hook=RequestException.from_dict, raw=False)
+                if exception.code == ExceptionCode.USER_EXISTS:
+                    logging.error(msg=exception.msg)
+                    show_error_dialog("Sorry that username is taken, please choose another one", True)
+                else:
+                    logging.fatal(msg=exception.msg)
+                    print("\nSorry something went wrong")
+                    client_send_socket.close()
+                    client_recv_socket.close()
+                    MainWindow.close()
+
+            # Send share data to the server
+            update_share_data(Path(self.user_settings["share_folder_path"]), client_send_socket)
+
+            # Spawn heartbeat worker in its own thread
+            self.heartbeat_thread = QThread()
+            self.heartbeat_worker = HeartbeatWorker()
+            self.heartbeat_worker.moveToThread(self.heartbeat_thread)
+            self.heartbeat_thread.started.connect(self.heartbeat_worker.run)
+            self.heartbeat_worker.update_status.connect(self.update_online_status)
+            self.heartbeat_thread.start()
+
+            # self.save_progress_thread = QThread()
+            # self.save_progress_worker = SaveProgressWorker()
+            # self.save_progress_worker.moveToThread(self.save_progress_thread)
+            # self.save_progress_thread.started.connect(self.save_progress_worker.run)
+            # self.save_progress_thread.start()
+
+            self.receive_thread = QThread()
+            self.receive_worker = ReceiveHandler()
+            self.receive_worker.moveToThread(self.receive_thread)
+            self.receive_thread.started.connect(self.receive_worker.run)
+            self.receive_worker.message_received.connect(self.messages_controller)
+            self.receive_worker.file_incoming.connect(self.direct_transfer_controller)
+            self.receive_thread.start()
+
+        except Exception as e:
+            logging.error(f"Could not connect to server: {e}")
+            sys.exit(
+                show_error_dialog(
+                    f"Could not connect to server:\
+                    {e}\nEnsure that the server is online and you have entered the correct server IP.",
+                    True,
+                )
+            )
+
+        self.setupUi(MainWindow)
+
+        try:
+            with (Path.home() / ".Flux/db/progress_widgets.pkl").open(mode="rb") as progress_widgets_dump:
+                progress_widgets_dump.seek(0)
+                progress_widgets_readable: dict[Path, ProgressBarData] = pickle.load(progress_widgets_dump)
+                for path, data in progress_widgets_readable.items():
+                    self.new_file_progress((path, data["total"]))
+                    progress_widgets[path].ui.update_progress(data["current"])
+                    progress_widgets[path].ui.btn_Toggle.setText("▶")
+                    progress_widgets[path].ui.paused = True
+                logging.debug(msg=f"Progress widgets loaded from dump\n{pformat(progress_widgets)}")
+        except Exception as e:
+            # Fallback if no dump was created
+            logging.error(msg=f"Failed to load progress widgets from dump: {e}")
+            # TODO: Generate transfer progress for progress widgets
+
+    def dump_progress_data(self) -> None:
+        """A method used to save progress data to disk. Called externally by the close event of MainWindow."""
+
+        worker = SaveProgressWorker()
+        worker.dump_progress_data()
+
+    def send_message(self) -> None:
+        """Sends a message to the global selected user"""
+
+        global client_send_socket
+        global client_recv_socket
+        global messages_store
+        global server_socket_mutex
+        global selected_uname
+
+        if self.txtedit_MessageInput.toPlainText() == "":
+            return
+
+        # Acquire lock for server socket
+        server_socket_mutex.lock()
+        peer_ip = ""
+        # Request peer ip from server if not cached
+        if uname_to_ip.get(selected_uname) is None:
+            peer_ip = request_ip(selected_uname, client_send_socket)
+            uname_to_ip[selected_uname] = peer_ip  # Update cache
+        # Use cached peer ip
+        else:
+            peer_ip = uname_to_ip.get(selected_uname)
+        # Release server socket
+        server_socket_mutex.unlock()
+        if peer_ip is not None:
+            # Send message to peer
+            client_peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client_peer_socket.connect((peer_ip, CLIENT_RECV_PORT))
+            msg = self.txtedit_MessageInput.toPlainText()
+            msg_bytes = msg.encode(FMT)
+            header = f"{HeaderCode.MESSAGE.value}{len(msg_bytes):<{HEADER_MSG_LEN}}".encode(FMT)
+            try:
+                client_peer_socket.send(header + msg_bytes)
+                # Update local messages store
+                if messages_store.get(selected_uname) is not None:
+                    messages_store[selected_uname].append({"sender": self_uname, "content": msg})
+                else:
+                    messages_store[selected_uname] = [{"sender": self_uname, "content": msg}]
+                self.render_messages(messages_store[selected_uname])
+            except Exception as e:
+                logging.error(f"Failed to send message: {e}")
+                show_error_dialog(f"Failed to send message.\n{e}")
+            finally:
+                self.txtedit_MessageInput.clear()
+        else:
+            logging.error(f"Could not find ip for user {selected_uname}")
+            show_error_dialog(f"This user has gone offline or does not exist. Try again later")
+
+    def closeEvent(self, event) -> None:
+        """Closes the heartbeat thread before exiting the application"""
+
+        self.heartbeat_thread.exit()
+        return super().closeEvent(event)
+
+    def render_file_tree(self, share: list[DirData] | None, parent: QTreeWidgetItem) -> None:
+        """Recursively traverse a directory structure to render in a tree widget
+        Parameters
+        ----------
+        share : list[DirData] | None
+            Dictionary representing a directory structure. Holds None for leaf nodes (files).
+        parent : QTreeWidgetItem
+            Parent item widget in the rendered tree
+        """
+
+        if share is None:
+            return
+
+        # Create widget for each item in the current level of the file tree
+        for item in share:
+            if item["type"] == "file":
+                file_item = QTreeWidgetItem(parent)
+                file_item.setText(0, item["name"])
+                file_item.setData(0, Qt.UserRole, item)
+            else:
+                dir_item = QTreeWidgetItem(parent)
+                dir_item.setText(0, item["name"] + "/")
+                dir_item.setData(0, Qt.UserRole, item)
+                # Recursive call for immediate children
+                self.render_file_tree(item["children"], dir_item)
+
+    def on_file_item_selected(self) -> None:
+        """Slot to perform actions when user selects a file.
+        This method sets the value of the global selected_file_items object. It also selectively enables or disables the File Info button.
+        """
+
+        global selected_file_items
+
+        selected_items = self.file_tree.selectedItems()
+        selected_file_items = []
+        # Create list of file items
+        for item in selected_items:
+            data: DirData = item.data(0, Qt.UserRole)
+            selected_file_items.append(data)
+        # Enable info btn if 1 item is selected
+        if len(selected_items) == 1:
+            self.lbl_FileInfo.setText(selected_file_items[0]["name"])
+            self.btn_FileInfo.setEnabled(True)
+        # Disable info btn if 0 or multiple items are selected
+        else:
+            self.lbl_FileInfo.setText(f"{len(selected_items)} items selected")
+            self.btn_FileInfo.setEnabled(False)
+
+    def download_files(self) -> None:
+        """Method to start downloads for the global selected file items."""
+
+        global selected_uname
+        global client_send_socket
+        global transfer_progress
+        global selected_file_items
+        global server_socket_mutex
+        global uname_to_ip
+
+        # Thread pool instanced
+        request_file_pool = QThreadPool.globalInstance()
+
+        for selected_item in selected_file_items:
+            server_socket_mutex.lock()
+            peer_ip = ""
+            # Use cache to obtain peer ip
+            if uname_to_ip.get(selected_uname) is None:
+                peer_ip = request_ip(selected_uname, client_send_socket)
+                uname_to_ip[selected_uname] = peer_ip
+            else:
+                peer_ip = uname_to_ip.get(selected_uname)
+            server_socket_mutex.unlock()
+            if peer_ip is None:
+                logging.error(f"Selected user {selected_uname} does not exist")
+                show_error_dialog(f"Selected user {selected_uname} does not exist")
+                return
+            # New transfer progress entry added
+            transfer_progress[TEMP_FOLDER_PATH / selected_uname / selected_item["path"]] = {
+                "progress": 0,
+                "status": TransferStatus.NEVER_STARTED,
+            }
+            # Start file download thread in pool
+            if selected_item["type"] == "file":
+                request_file_worker = RequestFileWorker(selected_item, peer_ip, selected_uname, None)
+                request_file_worker.signals.receiving_new_file.connect(self.new_file_progress)
+                request_file_worker.signals.file_progress_update.connect(self.update_file_progress)
+                request_file_worker.signals.file_download_complete.connect(self.remove_progress_widget)
+                request_file_pool.start(request_file_worker)
+            # Start folder download threads in pool
+            else:
+                files_to_request: list[DirData] = []
+                get_files_in_dir(
+                    selected_item["children"],
+                    files_to_request,
+                )
+                dir_path = TEMP_FOLDER_PATH / selected_uname / selected_item["path"]
+                # New directory progress entry added
+                dir_progress[dir_path] = {
+                    "current": 0,
+                    "total": get_directory_size(selected_item, 0, 0)[0],
+                    "status": TransferStatus.DOWNLOADING,
+                    "mutex": QMutex(),
+                }
+                self.new_file_progress((dir_path, dir_progress[dir_path]["total"]))
+                # Add transfer progress for all files in folder
+                for f in files_to_request:
+                    transfer_progress[TEMP_FOLDER_PATH / selected_uname / f["path"]] = {
+                        "progress": 0,
+                        "status": TransferStatus.NEVER_STARTED,
+                    }
+                # Start threads for all files in folder
+                for file in files_to_request:
+                    request_file_worker = RequestFileWorker(file, peer_ip, selected_uname, dir_path)
+                    request_file_worker.signals.dir_progress_update.connect(self.update_dir_progress)
+                    request_file_pool.start(request_file_worker)
+
+    def messages_controller(self, message: Message) -> None:
+        """Method to conditionally render chat messages.
+        Only performs the render operation if the received message is from the actively selected user.
+        Parameters
+        ----------
+        message : Message
+            the latest received message object
+        """
+
+        global selected_uname
+        global self_uname
+        # Only start rendering if selected user is sender
+        if message["sender"] == selected_uname:
+            self.render_messages(messages_store[selected_uname])
+
+    def render_messages(self, messages_list: list[Message]) -> None:
+        """Performs the render operation for chat messages.
+        Clears message area and replaces it with new html for the selected user's message history. Automatically scrolls down widget to new content.
+        Parameters
+        ----------
+        messages_list : list[Message]
+            list of message objects to be displayed, in order.
+        """
+
+        global self_uname
+        if messages_list is None or messages_list == []:
+            self.txtedit_MessagesArea.clear()
+            return
+        # Construct message area html
+        messages_html = LEADING_HTML
+        for message in messages_list:
+            messages_html += construct_message_html(message, message["sender"] == self_uname)
+        messages_html += TRAILING_HTML
+        self.txtedit_MessagesArea.setHtml(messages_html)
+        # Scroll to latest
+        self.txtedit_MessagesArea.verticalScrollBar().setValue(self.txtedit_MessagesArea.verticalScrollBar().maximum())
+
+    def update_online_status(self, new_status: dict[str, int]) -> None:
+        """Slot function that updates status display for users on the network.
+        Called by the update_status signal.
+        Parameters
+        ----------
+        new_status : dict[str, int]
+            latest fetched status dictionary that maps username to a last active timestamp.
+        """
+
+        global uname_to_status
+        # Existing users in local list
+        old_users = set(uname_to_status.keys())
+        # Users not initially in local list
+        new_users = set(new_status.keys())
+        # List of users to add
+        to_add = new_users.difference(old_users)
+        # List of users to remove
+        users_to_remove = old_users.difference(new_users)
+
+        # Update or remove widgets for users already present in local list
+        for index in range(self.lw_OnlineStatus.count()):
+            item = self.lw_OnlineStatus.item(index)
+            username = item.data(Qt.UserRole)
+            if username in users_to_remove:
+                item.setIcon(self.icon_Offline)
+                timestamp = time.localtime(uname_to_status[username])
+                item.setText(username + (f" (last active: {time.strftime('%d-%m-%Y %H:%M:%S', timestamp)})"))
+            else:
+                item.setIcon(
+                    self.icon_Online if time.time() - new_status[username] <= ONLINE_TIMEOUT else self.icon_Offline
+                )
+                timestamp = time.localtime(new_status[username])
+                item.setText(
+                    username
+                    + (
+                        ""
+                        if time.time() - new_status[username] <= ONLINE_TIMEOUT
+                        else f" (last active: {time.strftime('%d-%m-%Y %H:%M:%S', timestamp)})"
+                    )
+                )
+        # Add widgets for new users
+        for uname in to_add:
+            status_item = QListWidgetItem(self.lw_OnlineStatus)
+            status_item.setIcon(
+                self.icon_Online if time.time() - new_status[uname] <= ONLINE_TIMEOUT else self.icon_Offline
+            )
+            timestamp = time.localtime(new_status[uname])
+            status_item.setData(Qt.UserRole, uname)
+            status_item.setText(
+                uname + ""
+                if time.time() - new_status[uname] <= ONLINE_TIMEOUT
+                else f" (last active: {time.strftime('%d-%m-%Y %H:%M:%S', timestamp)})"
+            )
+        uname_to_status = new_status
+
+
+
 class Ui_FluxMainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
