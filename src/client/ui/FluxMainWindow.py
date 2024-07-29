@@ -174,6 +174,7 @@ server_socket_mutex = QMutex()
 
 def show_error_dialog(error_msg: str, show_settings: bool = False) -> None:
     """Displays an error dialog with the given message
+
     Parameters
     ----------
     error_msg : str
@@ -197,6 +198,7 @@ def show_error_dialog(error_msg: str, show_settings: bool = False) -> None:
 
 class SaveProgressWorker(QObject):
     """A worker that periodically saves the download progress and statuses to a file
+
     Methods
     -------
     dump_progress_data()
@@ -261,10 +263,12 @@ class SaveProgressWorker(QObject):
 
 class HeartbeatWorker(QObject):
     """A worker that periodically sends heartbeat messages to the server
+
     Attributes
     ----------
     update_status : pyqtSignal
         A signal that is emitted every time new status data is obtained from the server
+
     Methods
     -------
     run()
@@ -306,6 +310,7 @@ class HeartbeatWorker(QObject):
 
 class ReceiveDirectTransferWorker(QRunnable):
     """A worker that receives files sent via Direct Transfer from a peer
+
     Attributes
     ----------
     metadata : FileMetadata
@@ -314,6 +319,7 @@ class ReceiveDirectTransferWorker(QRunnable):
         The username of the sender
     file_receive_socket : socket.socket
         The socket on which to receive the file
+
     Methods
     -------
     run()
@@ -408,6 +414,7 @@ class ReceiveDirectTransferWorker(QRunnable):
 
 class HandleFileRequestWorker(QRunnable):
     """A worker that handles incoming requests to download files from other peers
+
     Attributes
     ----------
     filepath : Path
@@ -418,6 +425,7 @@ class HandleFileRequestWorker(QRunnable):
         Whether or not to send the hash of the file to the peer and the server
     resume_offset : int
         Number of bytes of offset to send the file from
+
     Methods
     -------
     run()
@@ -503,10 +511,11 @@ class HandleFileRequestWorker(QRunnable):
             show_error_dialog(f"File Sending failed.\n{e}")
         finally:
             file_send_socket.close()
-            
+
 
 class ReceiveHandler(QObject):
     """A worker that handles incoming packets sent by connected peers
+
     Attributes
     ----------
     message_received : pyqtSignal
@@ -515,6 +524,7 @@ class ReceiveHandler(QObject):
         A signal that is emitted every time a file is being received from a peer
     send_file_pool : QThreadPool
         The global thread pool used to run SendFileWorker instances
+
     Methods
     -------
     receive_msg(socket: socket.socket)
@@ -529,14 +539,17 @@ class ReceiveHandler(QObject):
 
     def receive_msg(self, socket: socket.socket) -> str | None:
         """Receives incoming messages, file requests or Direct Transfer requests
+
         Parameters
         ----------
         socket : socket.socket
             The socket on which to receive the message
+
         Returns
         ----------
         str | None
             Returns the message received from the peer, or None in case of an exception
+
         Raises
         ----------
         RequestException
@@ -731,6 +744,7 @@ class ReceiveHandler(QObject):
 
 class SendFileWorker(QObject):
     """A worker that sends files (for Direct Transfer) to peers
+
     Attributes
     ----------
     sending_file : pyqtSignal
@@ -739,6 +753,7 @@ class SendFileWorker(QObject):
         A signal that is emitted when the file transfer is complete
     filepath : Path
         The path to the file to be sent
+
     Methods
     -------
     run()
@@ -852,6 +867,7 @@ class SendFileWorker(QObject):
 
 class Signals(QObject):
     """A class containing signals that are emitted for various events
+
     Attributes
     ----------
     start_download : pyqtSignal
@@ -881,6 +897,7 @@ class Signals(QObject):
 
 class RequestFileWorker(QRunnable):
     """A worker that requests files or directories to be downloaded from the selected peer
+
     Attributes
     ----------
     file_item : DirData
@@ -891,6 +908,7 @@ class RequestFileWorker(QRunnable):
         The username of the sender
     parent_dir : Path | None
         In case of a directory download, the path of the parent directory to which the file_item belongs
+
     Methods
     ----------
     run()
@@ -909,6 +927,7 @@ class RequestFileWorker(QRunnable):
 
     def run(self) -> None:
         """Requests the file_item from the sender at peer_ip
+
         Raises
         ----------
         RequestException
@@ -1116,10 +1135,12 @@ class RequestFileWorker(QRunnable):
 
 class Ui_FluxMainWindow(QWidget):
     """A worker that requests files or directories to be downloaded from the selected peer
+
     Attributes
     ----------
     MainWindow : MainWindow
         The application's main window instance
+
     Methods
     ----------
     dump_progress_data()
@@ -1366,6 +1387,7 @@ class Ui_FluxMainWindow(QWidget):
 
     def render_file_tree(self, share: list[DirData] | None, parent: QTreeWidgetItem) -> None:
         """Recursively traverse a directory structure to render in a tree widget
+
         Parameters
         ----------
         share : list[DirData] | None
@@ -1392,6 +1414,7 @@ class Ui_FluxMainWindow(QWidget):
 
     def on_file_item_selected(self) -> None:
         """Slot to perform actions when user selects a file.
+
         This method sets the value of the global selected_file_items object. It also selectively enables or disables the File Info button.
         """
 
@@ -1481,9 +1504,12 @@ class Ui_FluxMainWindow(QWidget):
 
     def messages_controller(self, message: Message) -> None:
         """Method to conditionally render chat messages.
+
         Only performs the render operation if the received message is from the actively selected user.
+
         Parameters
         ----------
+
         message : Message
             the latest received message object
         """
@@ -1496,7 +1522,9 @@ class Ui_FluxMainWindow(QWidget):
 
     def render_messages(self, messages_list: list[Message]) -> None:
         """Performs the render operation for chat messages.
+
         Clears message area and replaces it with new html for the selected user's message history. Automatically scrolls down widget to new content.
+
         Parameters
         ----------
         messages_list : list[Message]
@@ -1518,7 +1546,9 @@ class Ui_FluxMainWindow(QWidget):
 
     def update_online_status(self, new_status: dict[str, int]) -> None:
         """Slot function that updates status display for users on the network.
+
         Called by the update_status signal.
+
         Parameters
         ----------
         new_status : dict[str, int]
@@ -1571,10 +1601,77 @@ class Ui_FluxMainWindow(QWidget):
             )
         uname_to_status = new_status
 
+    def on_user_selection_changed(self) -> None:
+        """Slot function to perform actions when a different user is selected.
 
+        This method is responsible for setting the global selected_user value and fetching a share directory structure to be rendered.
+        It also conditionally enables buttons for sending messages and files.
 
-class Ui_FluxMainWindow(object):
-    def setupUi(self, MainWindow):
+        Called by the itemSelectionChanged signal as well as the refresh button's clicked signal.
+        """
+
+        global selected_uname
+        global server_socket_mutex
+
+        items = self.lw_OnlineStatus.selectedItems()
+        if len(items):
+            item = items[0]
+            username: str = item.data(Qt.UserRole)
+            selected_uname = username
+            self.render_messages(messages_store.get(selected_uname))
+            # User considered offline if inactive beyond treshold [ONLINE_TIMEOUT] value
+            enable_if_online = True if time.time() - uname_to_status[username] < ONLINE_TIMEOUT else False
+            self.btn_SendMessage.setEnabled(enable_if_online)
+            self.btn_SendFile.setEnabled(enable_if_online)
+            self.btn_RefreshFileTree.setEnabled(enable_if_online)
+            # Clear file tree if selected user is offline
+            if time.time() - uname_to_status[username] > ONLINE_TIMEOUT:
+                self.file_tree.clear()
+                self.file_tree.headerItem().setText(0, "Selected user is offline")
+                return
+            # Fetch share data from server if selected user is online
+            searchquery_bytes = username.encode(FMT)
+            search_header = f"{HeaderCode.FILE_BROWSE.value}{len(searchquery_bytes):<{HEADER_MSG_LEN}}".encode(FMT)
+            server_socket_mutex.lock()
+            client_send_socket.send(search_header + searchquery_bytes)
+            response_header_type = client_send_socket.recv(HEADER_TYPE_LEN).decode(FMT)
+            if response_header_type == HeaderCode.FILE_BROWSE.value:
+                response_len = int(client_send_socket.recv(HEADER_MSG_LEN).decode(FMT).strip())
+                browse_files: list[DBData] = msgpack.unpackb(
+                    recvall(client_send_socket, response_len),
+                )
+                server_socket_mutex.unlock()
+                # Display share data for selected user
+                if len(browse_files):
+                    self.file_tree.clear()
+                    self.file_tree.headerItem().setText(0, username)
+                    self.render_file_tree(browse_files[0]["share"], self.file_tree)
+                else:
+                    print("No files found")
+            else:
+                server_socket_mutex.unlock()
+                logging.error(f"Error occured while fetching files data, {response_header_type}")
+                show_error_dialog(f"Error occured while fetching files data")
+        # Clear file tree and disable buttons if no user selected
+        else:
+            self.btn_SendMessage.setEnabled(False)
+            self.btn_SendFile.setEnabled(False)
+            self.btn_RefreshFileTree.setEnabled(False)
+            self.file_tree.clear()
+            self.file_tree.headerItem().setText(0, "No user selected")
+
+    def setupUi(self, MainWindow: MainWindow) -> None:
+        """Method to perform UI initialisation.
+
+        Sets layouts, widgets, items and properties in the MainWindow's ui.
+        Majority code generated by the Qt UIC
+
+        Parameters
+        ----------
+        MainWindow : MainWindow
+            Instance of the application's main window.
+        """
+
         if not MainWindow.objectName():
             MainWindow.setObjectName("MainWindow")
         MainWindow.resize(881, 744)
@@ -1616,15 +1713,25 @@ class Ui_FluxMainWindow(object):
 
         self.Buttons.addItem(self.horizontalSpacer)
 
-        self.pushButton_2 = QPushButton(self.centralwidget)
-        self.pushButton_2.setObjectName("pushButton_2")
+        self.btn_GlobalSearch = QPushButton(self.centralwidget)
+        self.btn_GlobalSearch.setObjectName("pushButton_7")
 
-        self.Buttons.addWidget(self.pushButton_2)
+        self.btn_AddFiles = QPushButton(self.centralwidget)
+        self.btn_AddFiles.setObjectName("pushButton_2")
+        self.btn_AddFiles.clicked.connect(self.import_files)
 
-        self.pushButton = QPushButton(self.centralwidget)
-        self.pushButton.setObjectName("pushButton")
+        self.btn_AddFolder = QPushButton(self.centralwidget)
+        self.btn_AddFolder.setObjectName("pushButton_2")
+        self.btn_AddFolder.clicked.connect(self.import_folder)
 
-        self.Buttons.addWidget(self.pushButton)
+        self.Buttons.addWidget(self.btn_GlobalSearch)
+        self.Buttons.addWidget(self.btn_AddFiles)
+        self.Buttons.addWidget(self.btn_AddFolder)
+
+        self.btn_Settings = QPushButton(self.centralwidget)
+        self.btn_Settings.setObjectName("pushButton")
+
+        self.Buttons.addWidget(self.btn_Settings)
 
         self.verticalLayout.addLayout(self.Buttons)
 
@@ -1632,51 +1739,61 @@ class Ui_FluxMainWindow(object):
         self.Content.setObjectName("Content")
         self.Files = QVBoxLayout()
         self.Files.setObjectName("Files")
-        self.label = QLabel(self.centralwidget)
-        self.label.setObjectName("label")
 
-        self.Files.addWidget(self.label)
+        self.hl_BrowseFilesHeader = QHBoxLayout()
 
-        self.treeWidget = QTreeWidget(self.centralwidget)
-        QTreeWidgetItem(self.treeWidget)
-        __qtreewidgetitem = QTreeWidgetItem(self.treeWidget)
-        QTreeWidgetItem(__qtreewidgetitem)
-        QTreeWidgetItem(__qtreewidgetitem)
-        QTreeWidgetItem(__qtreewidgetitem)
-        QTreeWidgetItem(self.treeWidget)
-        __qtreewidgetitem1 = QTreeWidgetItem(self.treeWidget)
-        QTreeWidgetItem(__qtreewidgetitem1)
-        QTreeWidgetItem(__qtreewidgetitem1)
-        QTreeWidgetItem(__qtreewidgetitem1)
-        QTreeWidgetItem(__qtreewidgetitem1)
-        QTreeWidgetItem(self.treeWidget)
-        self.treeWidget.setObjectName("treeWidget")
-        self.treeWidget.header().setVisible(True)
+        self.label_BrowseFiles = QLabel(self.centralwidget)
+        self.label_BrowseFiles.setObjectName("label")
 
-        self.Files.addWidget(self.treeWidget)
+        self.btn_RefreshFileTree = QPushButton(self.centralwidget)
+        sizePolicy_RefreshBtn = QSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        sizePolicy_RefreshBtn.setHorizontalStretch(0)
+        sizePolicy_RefreshBtn.setVerticalStretch(0)
+        self.btn_RefreshFileTree.setSizePolicy(sizePolicy_RefreshBtn)
+        self.btn_RefreshFileTree.setMinimumSize(QSize(30, 30))
+        self.btn_RefreshFileTree.setMaximumSize(QSize(30, 30))
+        self.btn_RefreshFileTree.setEnabled(False)
+        self.btn_RefreshFileTree.clicked.connect(self.on_user_selection_changed)
+
+        self.hl_BrowseFilesHeader.addWidget(self.label_BrowseFiles)
+        self.hl_BrowseFilesHeader.addWidget(self.btn_RefreshFileTree)
+        self.hl_BrowseFilesHeader.addItem(self.horizontalSpacer)
+
+        self.Files.addLayout(self.hl_BrowseFilesHeader)
+
+        self.file_tree = QTreeWidget(self.centralwidget)
+        # self.file_tree.itemClicked.connect(self.on_file_item_selected)
+        self.file_tree.itemSelectionChanged.connect(self.on_file_item_selected)
+        self.file_tree.header().setVisible(True)
+        self.file_tree.headerItem().setText(0, "No user selected")
+        self.file_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+
+        self.Files.addWidget(self.file_tree)
 
         self.horizontalLayout_2 = QHBoxLayout()
         self.horizontalLayout_2.setObjectName("horizontalLayout_2")
-        self.label_4 = QLabel(self.centralwidget)
-        self.label_4.setObjectName("label_4")
+        self.lbl_FileInfo = QLabel(self.centralwidget)
+        self.lbl_FileInfo.setObjectName("label_4")
 
-        self.horizontalLayout_2.addWidget(self.label_4)
+        self.horizontalLayout_2.addWidget(self.lbl_FileInfo)
 
         self.horizontalSpacer_2 = QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         self.horizontalLayout_2.addItem(self.horizontalSpacer_2)
 
-        self.pushButton_5 = QPushButton(self.centralwidget)
-        self.pushButton_5.setObjectName("pushButton_5")
-        self.pushButton_5.setEnabled(True)
+        self.btn_FileInfo = QPushButton(self.centralwidget)
+        self.btn_FileInfo.setObjectName("pushButton_5")
+        self.btn_FileInfo.setEnabled(True)
+        self.btn_FileInfo.clicked.connect(lambda: self.open_file_info(MainWindow))
 
-        self.horizontalLayout_2.addWidget(self.pushButton_5)
+        self.horizontalLayout_2.addWidget(self.btn_FileInfo)
 
-        self.pushButton_4 = QPushButton(self.centralwidget)
-        self.pushButton_4.setObjectName("pushButton_4")
-        self.pushButton_4.setEnabled(True)
+        self.btn_FileDownload = QPushButton(self.centralwidget)
+        self.btn_FileDownload.setObjectName("pushButton_4")
+        self.btn_FileDownload.setEnabled(True)
+        self.btn_FileDownload.clicked.connect(self.download_files)
 
-        self.horizontalLayout_2.addWidget(self.pushButton_4)
+        self.horizontalLayout_2.addWidget(self.btn_FileDownload)
 
         self.Files.addLayout(self.horizontalLayout_2)
 
@@ -1692,69 +1809,74 @@ class Ui_FluxMainWindow(object):
 
         self.Users.addWidget(self.label_2)
 
-        self.listWidget = QListWidget(self.centralwidget)
-        icon = QIcon()
-        icon.addFile("ui/res/earth.png", QSize(), QIcon.Normal, QIcon.Off)
-        __qlistwidgetitem = QListWidgetItem(self.listWidget)
-        __qlistwidgetitem.setIcon(icon)
-        __qlistwidgetitem1 = QListWidgetItem(self.listWidget)
-        __qlistwidgetitem1.setIcon(icon)
-        icon1 = QIcon()
-        icon1.addFile("ui/res/web-off.png", QSize(), QIcon.Normal, QIcon.Off)
-        __qlistwidgetitem2 = QListWidgetItem(self.listWidget)
-        __qlistwidgetitem2.setIcon(icon1)
-        __qlistwidgetitem3 = QListWidgetItem(self.listWidget)
-        __qlistwidgetitem3.setIcon(icon)
-        self.listWidget.setObjectName("listWidget")
-        self.listWidget.setSortingEnabled(False)
+        self.lw_OnlineStatus = QListWidget(self.centralwidget)
+        self.lw_OnlineStatus.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.lw_OnlineStatus.itemSelectionChanged.connect(self.on_user_selection_changed)
+        self.icon_Online = QIcon()
+        self.icon_Online.addFile("ui/res/earth.png", QSize(), QIcon.Normal, QIcon.Off)
 
-        self.Users.addWidget(self.listWidget)
+        self.icon_Offline = QIcon()
+        self.icon_Offline.addFile("ui/res/web-off.png", QSize(), QIcon.Normal, QIcon.Off)
 
-        self.textEdit = QTextEdit(self.centralwidget)
-        self.textEdit.setObjectName("textEdit")
+        self.lw_OnlineStatus.setObjectName("listWidget")
+        self.lw_OnlineStatus.setSortingEnabled(False)
+
+        self.Users.addWidget(self.lw_OnlineStatus)
+
+        self.txtedit_MessagesArea = QTextEdit(self.centralwidget)
+        self.txtedit_MessagesArea.setObjectName("textEdit")
         sizePolicy2 = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         sizePolicy2.setHorizontalStretch(0)
         sizePolicy2.setVerticalStretch(5)
-        sizePolicy2.setHeightForWidth(self.textEdit.sizePolicy().hasHeightForWidth())
-        self.textEdit.setSizePolicy(sizePolicy2)
-        self.textEdit.setMinimumSize(QSize(0, 0))
-        self.textEdit.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        sizePolicy2.setHeightForWidth(self.txtedit_MessagesArea.sizePolicy().hasHeightForWidth())
+        self.txtedit_MessagesArea.setSizePolicy(sizePolicy2)
+        self.txtedit_MessagesArea.setMinimumSize(QSize(0, 0))
+        self.txtedit_MessagesArea.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
-        self.Users.addWidget(self.textEdit)
+        self.Users.addWidget(self.txtedit_MessagesArea)
 
         self.horizontalLayout = QHBoxLayout()
         self.horizontalLayout.setObjectName("horizontalLayout")
         self.horizontalLayout.setSizeConstraint(QLayout.SetDefaultConstraint)
-        self.plainTextEdit = QPlainTextEdit(self.centralwidget)
-        self.plainTextEdit.setObjectName("plainTextEdit")
-        self.plainTextEdit.setEnabled(True)
+
+        self.txtedit_MessageInput = QPlainTextEdit(self.centralwidget)
+        self.txtedit_MessageInput.setObjectName("plainTextEdit")
+        self.txtedit_MessageInput.setEnabled(True)
         sizePolicy3 = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         sizePolicy3.setHorizontalStretch(0)
         sizePolicy3.setVerticalStretch(0)
-        sizePolicy3.setHeightForWidth(self.plainTextEdit.sizePolicy().hasHeightForWidth())
-        self.plainTextEdit.setSizePolicy(sizePolicy3)
-        self.plainTextEdit.setMaximumSize(QSize(16777215, 80))
+        sizePolicy3.setHeightForWidth(self.txtedit_MessageInput.sizePolicy().hasHeightForWidth())
+        self.txtedit_MessageInput.setSizePolicy(sizePolicy3)
+        # Use smaller text area for OS-X to correctly theme corresponding buttons
+        if sys.platform == "darwin":
+            self.txtedit_MessageInput.setMaximumSize(QSize(16777215, 60))
+        else:
+            self.txtedit_MessageInput.setMaximumSize(QSize(16777215, 80))
 
-        self.horizontalLayout.addWidget(self.plainTextEdit)
+        self.horizontalLayout.addWidget(self.txtedit_MessageInput)
 
         self.verticalLayout_6 = QVBoxLayout()
         self.verticalLayout_6.setObjectName("verticalLayout_6")
-        self.pushButton_3 = QPushButton(self.centralwidget)
-        self.pushButton_3.setObjectName("pushButton_3")
+        self.btn_SendMessage = QPushButton(self.centralwidget)
+        self.btn_SendMessage.setObjectName("pushButton_3")
+        self.btn_SendMessage.setEnabled(False)
         sizePolicy4 = QSizePolicy(QSizePolicy.Minimum, QSizePolicy.Minimum)
         sizePolicy4.setHorizontalStretch(0)
         sizePolicy4.setVerticalStretch(0)
-        sizePolicy4.setHeightForWidth(self.pushButton_3.sizePolicy().hasHeightForWidth())
-        self.pushButton_3.setSizePolicy(sizePolicy4)
+        sizePolicy4.setHeightForWidth(self.btn_SendMessage.sizePolicy().hasHeightForWidth())
+        self.btn_SendMessage.setSizePolicy(sizePolicy4)
+        self.btn_SendMessage.clicked.connect(self.send_message)
 
-        self.verticalLayout_6.addWidget(self.pushButton_3)
+        self.verticalLayout_6.addWidget(self.btn_SendMessage)
 
-        self.pushButton_6 = QPushButton(self.centralwidget)
-        self.pushButton_6.setObjectName("pushButton_6")
-        sizePolicy4.setHeightForWidth(self.pushButton_6.sizePolicy().hasHeightForWidth())
-        self.pushButton_6.setSizePolicy(sizePolicy4)
+        self.btn_SendFile = QPushButton(self.centralwidget)
+        self.btn_SendFile.setObjectName("pushButton_6")
+        sizePolicy4.setHeightForWidth(self.btn_SendFile.sizePolicy().hasHeightForWidth())
+        self.btn_SendFile.setSizePolicy(sizePolicy4)
+        self.btn_SendFile.setEnabled(False)
+        self.btn_SendFile.clicked.connect(self.share_file)
 
-        self.verticalLayout_6.addWidget(self.pushButton_6)
+        self.verticalLayout_6.addWidget(self.btn_SendFile)
 
         self.horizontalLayout.addLayout(self.verticalLayout_6)
 
@@ -1775,173 +1897,26 @@ class Ui_FluxMainWindow(object):
 
         self.verticalLayout.addWidget(self.label_12)
 
-        self.scrollArea = QScrollArea(self.centralwidget)
-        self.scrollArea.setObjectName("scrollArea")
-        sizePolicy5 = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.scroll_FileProgress = QScrollArea(self.centralwidget)
+        self.scroll_FileProgress.setObjectName("scrollArea")
+        sizePolicy5 = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         sizePolicy5.setHorizontalStretch(0)
         sizePolicy5.setVerticalStretch(0)
-        sizePolicy5.setHeightForWidth(self.scrollArea.sizePolicy().hasHeightForWidth())
-        self.scrollArea.setSizePolicy(sizePolicy5)
-        self.scrollArea.setMaximumSize(QSize(16777215, 150))
-        self.scrollArea.setWidgetResizable(True)
-        self.scrollAreaWidgetContents = QWidget()
-        self.scrollAreaWidgetContents.setObjectName("scrollAreaWidgetContents")
-        self.scrollAreaWidgetContents.setGeometry(QRect(0, 0, 831, 328))
-        self.verticalLayout_5 = QVBoxLayout(self.scrollAreaWidgetContents)
-        self.verticalLayout_5.setObjectName("verticalLayout_5")
-        self.widget_6 = QWidget(self.scrollAreaWidgetContents)
-        self.widget_6.setObjectName("widget_6")
-        sizePolicy6 = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        sizePolicy6.setHorizontalStretch(0)
-        sizePolicy6.setVerticalStretch(0)
-        sizePolicy6.setHeightForWidth(self.widget_6.sizePolicy().hasHeightForWidth())
-        self.widget_6.setSizePolicy(sizePolicy6)
-        self.widget_6.setMinimumSize(QSize(0, 40))
-        self.widget_6.setMaximumSize(QSize(16777215, 40))
-        self.horizontalLayout_8 = QHBoxLayout(self.widget_6)
-        self.horizontalLayout_8.setObjectName("horizontalLayout_8")
-        self.label_10 = QLabel(self.widget_6)
-        self.label_10.setObjectName("label_10")
+        sizePolicy5.setHeightForWidth(self.scroll_FileProgress.sizePolicy().hasHeightForWidth())
+        self.scroll_FileProgress.setSizePolicy(sizePolicy5)
+        # self.scroll_FileProgress.setMaximumSize(QSize(16777215, 250))
+        self.scroll_FileProgress.setMinimumSize(QSize(0, 150))
+        self.scroll_FileProgress.setWidgetResizable(True)
+        self.scrollContents_FileProgress = QWidget()
+        self.scrollContents_FileProgress.setObjectName("scrollAreaWidgetContents")
+        self.scrollContents_FileProgress.setGeometry(QRect(0, 0, 831, 328))
+        self.vBoxLayout_ScrollContents = QVBoxLayout(self.scrollContents_FileProgress)
+        self.vBoxLayout_ScrollContents.setObjectName("verticalLayout_5")
+        self.vBoxLayout_ScrollContents.setAlignment(Qt.AlignTop)
 
-        self.horizontalLayout_8.addWidget(self.label_10)
+        self.scroll_FileProgress.setWidget(self.scrollContents_FileProgress)
 
-        self.progressBar_6 = QProgressBar(self.widget_6)
-        self.progressBar_6.setObjectName("progressBar_6")
-        self.progressBar_6.setValue(24)
-
-        self.horizontalLayout_8.addWidget(self.progressBar_6)
-
-        self.verticalLayout_5.addWidget(self.widget_6)
-
-        self.widget_3 = QWidget(self.scrollAreaWidgetContents)
-        self.widget_3.setObjectName("widget_3")
-        sizePolicy6.setHeightForWidth(self.widget_3.sizePolicy().hasHeightForWidth())
-        self.widget_3.setSizePolicy(sizePolicy6)
-        self.widget_3.setMinimumSize(QSize(0, 40))
-        self.widget_3.setMaximumSize(QSize(16777215, 40))
-        self.horizontalLayout_5 = QHBoxLayout(self.widget_3)
-        self.horizontalLayout_5.setObjectName("horizontalLayout_5")
-        self.label_7 = QLabel(self.widget_3)
-        self.label_7.setObjectName("label_7")
-
-        self.horizontalLayout_5.addWidget(self.label_7)
-
-        self.progressBar_3 = QProgressBar(self.widget_3)
-        self.progressBar_3.setObjectName("progressBar_3")
-        self.progressBar_3.setValue(24)
-
-        self.horizontalLayout_5.addWidget(self.progressBar_3)
-
-        self.verticalLayout_5.addWidget(self.widget_3)
-
-        self.widget_4 = QWidget(self.scrollAreaWidgetContents)
-        self.widget_4.setObjectName("widget_4")
-        sizePolicy6.setHeightForWidth(self.widget_4.sizePolicy().hasHeightForWidth())
-        self.widget_4.setSizePolicy(sizePolicy6)
-        self.widget_4.setMinimumSize(QSize(0, 40))
-        self.widget_4.setMaximumSize(QSize(16777215, 40))
-        self.horizontalLayout_6 = QHBoxLayout(self.widget_4)
-        self.horizontalLayout_6.setObjectName("horizontalLayout_6")
-        self.label_8 = QLabel(self.widget_4)
-        self.label_8.setObjectName("label_8")
-
-        self.horizontalLayout_6.addWidget(self.label_8)
-
-        self.progressBar_4 = QProgressBar(self.widget_4)
-        self.progressBar_4.setObjectName("progressBar_4")
-        self.progressBar_4.setValue(24)
-
-        self.horizontalLayout_6.addWidget(self.progressBar_4)
-
-        self.verticalLayout_5.addWidget(self.widget_4)
-
-        self.widget = QWidget(self.scrollAreaWidgetContents)
-        self.widget.setObjectName("widget")
-        sizePolicy6.setHeightForWidth(self.widget.sizePolicy().hasHeightForWidth())
-        self.widget.setSizePolicy(sizePolicy6)
-        self.widget.setMinimumSize(QSize(0, 40))
-        self.widget.setMaximumSize(QSize(16777215, 40))
-        self.horizontalLayout_3 = QHBoxLayout(self.widget)
-        self.horizontalLayout_3.setObjectName("horizontalLayout_3")
-        self.label_5 = QLabel(self.widget)
-        self.label_5.setObjectName("label_5")
-
-        self.horizontalLayout_3.addWidget(self.label_5)
-
-        self.progressBar = QProgressBar(self.widget)
-        self.progressBar.setObjectName("progressBar")
-        self.progressBar.setValue(24)
-
-        self.horizontalLayout_3.addWidget(self.progressBar)
-
-        self.verticalLayout_5.addWidget(self.widget, 0, Qt.AlignTop)
-
-        self.widget_5 = QWidget(self.scrollAreaWidgetContents)
-        self.widget_5.setObjectName("widget_5")
-        sizePolicy6.setHeightForWidth(self.widget_5.sizePolicy().hasHeightForWidth())
-        self.widget_5.setSizePolicy(sizePolicy6)
-        self.widget_5.setMinimumSize(QSize(0, 40))
-        self.widget_5.setMaximumSize(QSize(16777215, 40))
-        self.horizontalLayout_7 = QHBoxLayout(self.widget_5)
-        self.horizontalLayout_7.setObjectName("horizontalLayout_7")
-        self.label_9 = QLabel(self.widget_5)
-        self.label_9.setObjectName("label_9")
-
-        self.horizontalLayout_7.addWidget(self.label_9)
-
-        self.progressBar_5 = QProgressBar(self.widget_5)
-        self.progressBar_5.setObjectName("progressBar_5")
-        self.progressBar_5.setValue(24)
-
-        self.horizontalLayout_7.addWidget(self.progressBar_5)
-
-        self.verticalLayout_5.addWidget(self.widget_5)
-
-        self.widget_2 = QWidget(self.scrollAreaWidgetContents)
-        self.widget_2.setObjectName("widget_2")
-        sizePolicy6.setHeightForWidth(self.widget_2.sizePolicy().hasHeightForWidth())
-        self.widget_2.setSizePolicy(sizePolicy6)
-        self.widget_2.setMinimumSize(QSize(0, 40))
-        self.widget_2.setMaximumSize(QSize(16777215, 40))
-        self.horizontalLayout_4 = QHBoxLayout(self.widget_2)
-        self.horizontalLayout_4.setObjectName("horizontalLayout_4")
-        self.label_6 = QLabel(self.widget_2)
-        self.label_6.setObjectName("label_6")
-
-        self.horizontalLayout_4.addWidget(self.label_6)
-
-        self.progressBar_2 = QProgressBar(self.widget_2)
-        self.progressBar_2.setObjectName("progressBar_2")
-        self.progressBar_2.setValue(24)
-
-        self.horizontalLayout_4.addWidget(self.progressBar_2)
-
-        self.verticalLayout_5.addWidget(self.widget_2)
-
-        self.widget_7 = QWidget(self.scrollAreaWidgetContents)
-        self.widget_7.setObjectName("widget_7")
-        sizePolicy6.setHeightForWidth(self.widget_7.sizePolicy().hasHeightForWidth())
-        self.widget_7.setSizePolicy(sizePolicy6)
-        self.widget_7.setMinimumSize(QSize(0, 40))
-        self.widget_7.setMaximumSize(QSize(16777215, 40))
-        self.horizontalLayout_9 = QHBoxLayout(self.widget_7)
-        self.horizontalLayout_9.setObjectName("horizontalLayout_9")
-        self.label_11 = QLabel(self.widget_7)
-        self.label_11.setObjectName("label_11")
-
-        self.horizontalLayout_9.addWidget(self.label_11)
-
-        self.progressBar_7 = QProgressBar(self.widget_7)
-        self.progressBar_7.setObjectName("progressBar_7")
-        self.progressBar_7.setValue(24)
-
-        self.horizontalLayout_9.addWidget(self.progressBar_7)
-
-        self.verticalLayout_5.addWidget(self.widget_7, 0, Qt.AlignTop)
-
-        self.scrollArea.setWidget(self.scrollAreaWidgetContents)
-
-        self.verticalLayout.addWidget(self.scrollArea)
+        self.verticalLayout.addWidget(self.scroll_FileProgress)
 
         self.verticalLayout_4.addLayout(self.verticalLayout)
 
@@ -1951,111 +1926,454 @@ class Ui_FluxMainWindow(object):
 
         QMetaObject.connectSlotsByName(MainWindow)
 
-    # setupUi
+    def retranslateUi(self, MainWindow: MainWindow) -> None:
+        """Method to show initial content on the UI.
 
-    def retranslateUi(self, MainWindow):
+        Sets base text on labels and buttons.
+        Majority code generated by the Qt UIC
+
+        Parameters
+        ----------
+        MainWindow : MainWindow
+            Instance of the application's main window.
+        """
+
         MainWindow.setWindowTitle(QCoreApplication.translate("MainWindow", "Flux", None))
-        self.label_3.setText(QCoreApplication.translate("MainWindow", "Flux / john_doe_", None))
-        self.pushButton_2.setText(QCoreApplication.translate("MainWindow", "Add Files", None))
-        self.pushButton.setText(QCoreApplication.translate("MainWindow", "Settings", None))
-        self.label.setText(QCoreApplication.translate("MainWindow", "Browse Files", None))
-        ___qtreewidgetitem = self.treeWidget.headerItem()
-        ___qtreewidgetitem.setText(
-            0, QCoreApplication.translate("MainWindow", "RichardRoe12", None)
-        )
+        self.label_3.setText(QCoreApplication.translate("MainWindow", f"Flux / {self.user_settings['uname']}", None))
+        self.btn_GlobalSearch.setText(QCoreApplication.translate("MainWindow", "Global Search", None))
+        self.btn_AddFiles.setText(QCoreApplication.translate("MainWindow", "Import Files", None))
+        self.btn_AddFolder.setText(QCoreApplication.translate("MainWindow", "Import Folder", None))
+        self.btn_Settings.setText(QCoreApplication.translate("MainWindow", "Settings", None))
+        self.label_BrowseFiles.setText(QCoreApplication.translate("MainWindow", "Browse Files", None))
 
-        __sortingEnabled = self.treeWidget.isSortingEnabled()
-        self.treeWidget.setSortingEnabled(False)
-        ___qtreewidgetitem1 = self.treeWidget.topLevelItem(0)
-        ___qtreewidgetitem1.setText(
-            0, QCoreApplication.translate("MainWindow", "photoshop.iso", None)
-        )
-        ___qtreewidgetitem2 = self.treeWidget.topLevelItem(1)
-        ___qtreewidgetitem2.setText(0, QCoreApplication.translate("MainWindow", "Movies/", None))
-        ___qtreewidgetitem3 = ___qtreewidgetitem2.child(0)
-        ___qtreewidgetitem3.setText(
-            0, QCoreApplication.translate("MainWindow", "The Matrix.mov", None)
-        )
-        ___qtreewidgetitem4 = ___qtreewidgetitem2.child(1)
-        ___qtreewidgetitem4.setText(
-            0, QCoreApplication.translate("MainWindow", "Forrest Gump.mp4", None)
-        )
-        ___qtreewidgetitem5 = ___qtreewidgetitem2.child(2)
-        ___qtreewidgetitem5.setText(0, QCoreApplication.translate("MainWindow", "Django.mp4", None))
-        ___qtreewidgetitem6 = self.treeWidget.topLevelItem(2)
-        ___qtreewidgetitem6.setText(
-            0, QCoreApplication.translate("MainWindow", "msoffice.zip", None)
-        )
-        ___qtreewidgetitem7 = self.treeWidget.topLevelItem(3)
-        ___qtreewidgetitem7.setText(0, QCoreApplication.translate("MainWindow", "Games/", None))
-        ___qtreewidgetitem8 = ___qtreewidgetitem7.child(0)
-        ___qtreewidgetitem8.setText(0, QCoreApplication.translate("MainWindow", "NFS/", None))
-        ___qtreewidgetitem9 = ___qtreewidgetitem7.child(1)
-        ___qtreewidgetitem9.setText(
-            0, QCoreApplication.translate("MainWindow", "nfsmostwanted.zip", None)
-        )
-        ___qtreewidgetitem10 = ___qtreewidgetitem7.child(2)
-        ___qtreewidgetitem10.setText(
-            0, QCoreApplication.translate("MainWindow", "TLauncher.zip", None)
-        )
-        ___qtreewidgetitem11 = ___qtreewidgetitem7.child(3)
-        ___qtreewidgetitem11.setText(0, QCoreApplication.translate("MainWindow", "GTA-V.iso", None))
-        ___qtreewidgetitem12 = self.treeWidget.topLevelItem(4)
-        ___qtreewidgetitem12.setText(
-            0, QCoreApplication.translate("MainWindow", "Study Material/", None)
-        )
-        self.treeWidget.setSortingEnabled(__sortingEnabled)
+        self.btn_GlobalSearch.clicked.connect(lambda: self.open_global_search(MainWindow))
+        self.btn_Settings.clicked.connect(lambda: self.open_settings(MainWindow))
 
-        self.label_4.setText(
-            QCoreApplication.translate("MainWindow", "Selected File/Folder: msoffice.zip", None)
-        )
-        self.pushButton_5.setText(QCoreApplication.translate("MainWindow", "Info", None))
-        self.pushButton_4.setText(QCoreApplication.translate("MainWindow", "Download", None))
+        __sortingEnabled = self.file_tree.isSortingEnabled()
+        self.file_tree.setSortingEnabled(__sortingEnabled)
+
+        self.lbl_FileInfo.setText(QCoreApplication.translate("MainWindow", "No file or folder selected", None))
+        self.btn_FileInfo.setText(QCoreApplication.translate("MainWindow", "Info", None))
+        self.btn_FileDownload.setText(QCoreApplication.translate("MainWindow", "Download", None))
         self.label_2.setText(QCoreApplication.translate("MainWindow", "Users", None))
 
-        __sortingEnabled1 = self.listWidget.isSortingEnabled()
-        self.listWidget.setSortingEnabled(False)
-        ___qlistwidgetitem = self.listWidget.item(0)
-        ___qlistwidgetitem.setText(QCoreApplication.translate("MainWindow", "RichardRoe12", None))
-        ___qlistwidgetitem1 = self.listWidget.item(1)
-        ___qlistwidgetitem1.setText(QCoreApplication.translate("MainWindow", "ronaldw", None))
-        ___qlistwidgetitem2 = self.listWidget.item(2)
-        ___qlistwidgetitem2.setText(
-            QCoreApplication.translate("MainWindow", "harrypotter (last active: 11:45 am)", None)
-        )
-        ___qlistwidgetitem3 = self.listWidget.item(3)
-        ___qlistwidgetitem3.setText(QCoreApplication.translate("MainWindow", "anonymous_lol", None))
-        self.listWidget.setSortingEnabled(__sortingEnabled1)
+        __sortingEnabled1 = self.lw_OnlineStatus.isSortingEnabled()
+        self.lw_OnlineStatus.setSortingEnabled(False)
+        self.lw_OnlineStatus.setSortingEnabled(__sortingEnabled1)
 
-        self.textEdit.setHtml(
-            QCoreApplication.translate(
-                "MainWindow",
-                '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0//EN" "http://www.w3.org/TR/REC-html40/strict.dtd">\n'
-                '<html><head><meta name="qrichtext" content="1" /><style type="text/css">\n'
-                "p, li { white-space: pre-wrap; }\n"
-                "</style></head><body style=\" font-family:'Noto Sans'; font-size:10pt; font-weight:400; font-style:normal;\">\n"
-                '<p style=" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;"><span style=" font-weight:600; color:#e5a50a;">12:03</span><span style=" font-weight:600;"> RichardRoe12: </span>Hello</p>\n'
-                '<p style=" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;"><span style=" font-weight:600; color:#1a5fb4;">12:03</span><span style=" font-weight:600;"> You: </span>Hii</p>\n'
-                '<p style=" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;"><span style=" font-weight:600; color:#e5a50a;">12:03</span><span style="'
-                ' font-weight:600;"> RichardRoe12: </span>Got any games?</p>\n'
-                '<p style=" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;"><span style=" font-weight:600; color:#1a5fb4;">12:03</span><span style=" font-weight:600;"> You: </span>Probably</p>\n'
-                '<p style=" margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;"><span style=" font-weight:600; color:#1a5fb4;">12:03</span><span style=" font-weight:600;"> You: </span>Wait ill upload something...</p>',
-                "</body></html>",
-                # None,
-            )
-        )
-        self.plainTextEdit.setPlaceholderText(
-            QCoreApplication.translate("MainWindow", "Enter message", None)
-        )
-        self.pushButton_3.setText(QCoreApplication.translate("MainWindow", "Send Message", None))
-        self.pushButton_6.setText(QCoreApplication.translate("MainWindow", "Send File", None))
+        self.txtedit_MessageInput.setPlaceholderText(QCoreApplication.translate("MainWindow", "Enter message", None))
+        self.btn_SendMessage.setText(QCoreApplication.translate("MainWindow", "Send Message", None))
+        self.btn_SendFile.setText(QCoreApplication.translate("MainWindow", "Send File", None))
         self.label_12.setText(QCoreApplication.translate("MainWindow", "Downloading:", None))
-        self.label_10.setText(QCoreApplication.translate("MainWindow", "TextLabel", None))
-        self.label_7.setText(QCoreApplication.translate("MainWindow", "TextLabel", None))
-        self.label_8.setText(QCoreApplication.translate("MainWindow", "TextLabel", None))
-        self.label_5.setText(QCoreApplication.translate("MainWindow", "TextLabel", None))
-        self.label_9.setText(QCoreApplication.translate("MainWindow", "TextLabel", None))
-        self.label_6.setText(QCoreApplication.translate("MainWindow", "TextLabel", None))
-        self.label_11.setText(QCoreApplication.translate("MainWindow", "TextLabel", None))
+        self.btn_RefreshFileTree.setText(QCoreApplication.translate("MainWindow", "⟳", None))
 
-    # retranslateUi
+    def open_settings(self, MainWindow: MainWindow) -> None:
+        """Slot function to launch the user settings dialog
+
+        Called by the clicked signal of the settings button.
+
+        Parameters
+        ----------
+        MainWindow : MainWindow
+            Instance of the application's main window.
+        """
+
+        settings_dialog = QDialog(MainWindow)
+        settings_dialog.ui = Ui_SettingsDialog(settings_dialog, self.user_settings)
+        settings_dialog.exec()
+
+    def open_file_info(self, MainWindow: MainWindow) -> None:
+        """Slot function to launch the file information dialog for a global selected item.
+
+        Called by the clicked signal of the file info button.
+
+        Parameters
+        ----------
+        MainWindow : MainWindow
+            Instance of the application's main window.
+        """
+
+        global selected_file_items
+        global selected_uname
+        selected_item = selected_file_items[0]
+        size = selected_item["size"]
+        filedata = {
+            "name": selected_item["name"],
+            "hash": selected_item["hash"] or "Not available",
+            "type": selected_item["type"],
+            "size": convert_size(size or 0),
+            "owner": selected_uname,
+        }
+        if selected_item["type"] != "file":
+            size, count = get_directory_size(selected_item, 0, 0)
+            filedata["size"] = convert_size(size)
+            filedata["count"] = f"{count} files"
+        file_info_dialog = QDialog(MainWindow)
+        file_info_dialog.ui = Ui_FileInfoDialog(file_info_dialog, filedata, self.download_files)
+        file_info_dialog.exec()
+
+    def import_files(self) -> None:
+        """Slot function to launch a file picker for importing file symlinks.
+
+        Called by the clicked signal of the add files button.
+        """
+
+        global server_socket_mutex
+        files, _ = QFileDialog.getOpenFileNames(self, "Import Files", str(Path.home()), "All Files (*)")
+        for file in files:
+            imported = import_file_to_share(Path(file), Path(self.user_settings["share_folder_path"]))
+            if imported is not None:
+                print(f"Imported file {imported}")
+        # Provide up-to-date share directory data to server
+        server_socket_mutex.lock()
+        update_share_data(Path(self.user_settings["share_folder_path"]), client_send_socket)
+        server_socket_mutex.unlock()
+
+    def import_folder(self) -> None:
+        """Slot function to launch a file picker for importing folder symlinks.
+
+        Called by the clicked signal of the add folder button.
+        """
+
+        global server_socket_mutex
+
+        dir = QFileDialog.getExistingDirectory(self, "Import Folder", str(Path.home()), QFileDialog.ShowDirsOnly)
+        if dir == "":
+            return
+        imported = import_file_to_share(Path(dir), Path(self.user_settings["share_folder_path"]))
+        if imported is not None:
+            print(f"Imported file {imported}")
+        # Provide up-to-date share directory data to server
+        server_socket_mutex.lock()
+        update_share_data(Path(self.user_settings["share_folder_path"]), client_send_socket)
+        server_socket_mutex.unlock()
+
+    def share_file(self) -> None:
+        """Slot function to launch a file picker for a direct file transfer.
+
+        Called by the clicked signal of the send file button.
+        Starts a thread to perform the transfer.
+        """
+
+        filepath, _ = QFileDialog.getOpenFileName(self, "Send Files", str(Path.home()), "All Files (*)")
+        if filepath == "":
+            return
+
+        # Create thread to send a file
+        self.send_file_thread = QThread()
+        self.send_file_worker = SendFileWorker(Path(filepath))
+        self.send_file_worker.moveToThread(self.send_file_thread)
+        self.send_file_thread.started.connect(self.send_file_worker.run)
+        self.send_file_worker.sending_file.connect(self.messages_controller)
+        self.send_file_worker.completed.connect(self.send_file_thread.quit)
+        self.send_file_worker.completed.connect(self.send_file_worker.deleteLater)
+        self.send_file_thread.finished.connect(self.send_file_thread.deleteLater)
+
+        self.send_file_thread.start()
+
+    def pause_download(self, path: Path) -> None:
+        """Slot function to pause an active download.
+
+        Called by the pause_download signal.
+        This method updates the global transfer progress object to reflect the paused status for a given item.
+
+        Parameters
+        ----------
+        path : Path
+            Path to the item to pause. This path should exist in the client's temp folder.
+        """
+
+        logging.debug(f"Paused file {path}")
+        # Set transfer statuses to paused to notify relevant threads to halt the transfer
+        if path.is_file():
+            transfer_progress[path]["status"] = TransferStatus.PAUSED
+        else:
+            for (pathname, progress) in transfer_progress.items():
+                if path in pathname.parents:
+                    if progress["status"] in [
+                        TransferStatus.DOWNLOADING,
+                        TransferStatus.NEVER_STARTED,
+                    ]:
+                        transfer_progress[pathname]["status"] = TransferStatus.PAUSED
+
+    def resume_download(self, path: Path) -> None:
+        """Slot function to resume a paused download.
+
+        Called by the resume_download signal.
+        This method updates the global transfer progress object to reflect the resumed status for a given item.
+        New file download workers are created and submitted to a global thread pool instance.
+
+        Parameters
+        ----------
+        path : Path
+            Path to the item to pause. This path should exist in the client's temp folder.
+        """
+
+        global transfer_progress
+        # Get relative path from temp folder
+        relative_path = path.relative_to(TEMP_FOLDER_PATH)
+        # Extract sender username from temp path
+        uname = str(relative_path.parents[-2])
+        peer_ip = request_ip(uname, client_send_socket)
+        logging.debug(msg=f"resuming for peer ip {peer_ip}")
+        if peer_ip is None:
+            logging.debug(msg=f"\nUser with username {uname} not found")
+            show_error_dialog(f"Owner of this item is not available at the moment")
+            # TODO: auto switch progress bar to paused state
+            return
+        pool = QThreadPool.globalInstance()
+        # Start file download
+        if path.is_file():
+            file_item: DirData = {
+                "name": path.name,
+                "path": str(relative_path).removeprefix(uname + "/"),
+                "type": "file",
+                "size": 0,
+                "hash": None,
+                "compression": CompressionMethod.NONE,
+                "children": None,
+            }
+            # Update transfer progress
+            transfer_progress[path]["status"] = TransferStatus.DOWNLOADING
+            # Start file request thread in pool
+            worker = RequestFileWorker(file_item, peer_ip, uname, None)
+            worker.signals.file_progress_update.connect(self.update_file_progress)
+            worker.signals.file_download_complete.connect(self.remove_progress_widget)
+            pool.start(worker)
+        elif path.is_dir():
+            # Obtain paused files in requested directory
+            paused_items: list[DirData] = []
+            for (pathname, progress) in transfer_progress.items():
+                if path in pathname.parents:
+                    if progress["status"] == TransferStatus.PAUSED:
+                        transfer_progress[pathname]["status"] = TransferStatus.DOWNLOADING
+                        paused_items.append(
+                            {
+                                "name": pathname.name,
+                                "path": str(pathname.relative_to(TEMP_FOLDER_PATH / uname)),
+                                "type": "file",
+                                "size": 0,
+                                "hash": None,
+                                "compression": CompressionMethod.NONE,
+                                "children": None,
+                            }
+                        )
+
+            # Update transfer progress
+            for file in paused_items:
+                transfer_progress[TEMP_FOLDER_PATH / uname / file["path"]]["status"] = TransferStatus.DOWNLOADING
+
+            # Start file request threads in pool
+            for file in paused_items:
+                request_file_worker = RequestFileWorker(file, peer_ip, uname, path)
+                request_file_worker.signals.dir_progress_update.connect(self.update_dir_progress)
+                pool.start(request_file_worker)
+
+    def remove_progress_widget(self, path: Path) -> None:
+        """UI utility method to clear progress widget for a completed download.
+
+        A notification is sent at this stage to inform the user of the download's completion.
+
+        Parameters
+        ----------
+        path : Path
+            Path to completed item.
+        """
+
+        global progress_widgets
+        if user_settings["show_notifications"]:
+            notif = Notify()
+            notif.application_name = "Flux"
+            notif.title = "Download complete"
+            notif.message = f"{path.name} downloaded to {user_settings['downloads_folder_path']}"
+            notif.send()
+        widget = progress_widgets.get(path)
+        if widget is not None:
+            self.vBoxLayout_ScrollContents.removeWidget(widget)
+            del progress_widgets[path]
+        else:
+            logging.info(f"Could not find progress widget for {path}")
+
+    def new_file_progress(self, data: tuple[Path, int]) -> None:
+        """UI utility method to render a new progress widget for a new or resumed download.
+
+        Parameters
+        ----------
+        data : tuple[Path, int]
+            Initial data provided to progress widget.
+            Pairs an item's path with its total size.
+        """
+
+        global progress_widgets
+        file_progress_widget = QWidget(self.scrollContents_FileProgress)
+        file_progress_widget.ui = Ui_FileProgressWidget(
+            file_progress_widget,
+            data[0],
+            data[1],
+            self.signals.pause_download,
+            self.signals.resume_download,
+        )
+        self.vBoxLayout_ScrollContents.addWidget(file_progress_widget)
+        progress_widgets[data[0]] = file_progress_widget
+
+    def update_file_progress(self, path: Path) -> None:
+        """Method to update the progress indicator for a downloading file.
+
+        New progress amount is obtained from the global transfer progress dictionary.
+
+        Parameters
+        ----------
+        path : Path
+            Path to downloading file.
+        """
+
+        global transfer_progress
+        global progress_widgets
+        logging.debug(f"progress_widgets: {progress_widgets}")
+        if progress_widgets.get(path) is not None and transfer_progress.get(path) is not None:
+            progress_widgets[path].ui.update_progress(transfer_progress[path]["progress"])
+
+    def update_dir_progress(self, progress_data: tuple[Path, int]) -> None:
+        """Method to update the progress indicator for a downloading folder.
+
+        New progress amount is obtained from the global directory progress dictionary and provided increment value.
+
+        Parameters
+        ----------
+        progress_data : tuple[Path, int]
+            Pairs directory path to an increment in progress.
+        """
+
+        global dir_progress
+        global progress_widgets
+        path, increment = progress_data
+        dir_progress[path]["mutex"].lock()
+        dir_progress[path]["current"] += increment
+        if dir_progress[path]["current"] == dir_progress[path]["total"]:
+            self.remove_progress_widget(path)
+        else:
+            progress_widgets[path].ui.update_progress(dir_progress[path]["current"])
+        dir_progress[path]["mutex"].unlock()
+
+    def direct_transfer_controller(self, data: tuple[FileMetadata, socket.socket]) -> None:
+        """Method to handle an incoming direct file transfer.
+
+        A message box is displayed to get consent to receive file.
+        Corresponding helpers are called based on user choice.
+
+        Parameters
+        ----------
+        data : tuple[FileMetadata, socket.socket]
+            Pairs a metadata object to the sender's socket
+        """
+
+        global ip_to_uname
+        metadata, peer_socket = data
+        username = ip_to_uname[peer_socket.getpeername()[0]]
+        # Construct user consent message box
+        message_box = QMessageBox(self.MainWindow)
+        message_box.setIcon(QMessageBox.Question)
+        message_box.setWindowTitle("File incoming")
+        message_box.setText(f"{username} is trying to send you a file: {metadata['path']}\nDo you want to accept?")
+        btn_Accept = message_box.addButton(QMessageBox.Yes)
+        btn_Reject = message_box.addButton(QMessageBox.No)
+        # If user accepts file
+        btn_Accept.clicked.connect(lambda: self.direct_transfer_accept(metadata, username, peer_socket))
+        # If user rejects file
+        btn_Reject.clicked.connect(lambda: self.direct_transfer_reject(peer_socket))
+        message_box.exec()
+
+    def direct_transfer_accept(self, metadata: FileMetadata, sender: str, peer_socket: socket.socket) -> None:
+        """Helper method for accepting a direct transfer request.
+
+        Creates a new socket for receiving file and sends new port to the sender.
+        Creates a worker to receive file and submits it to an instance of the global thread pool.
+
+        Parameters
+        ----------
+        metadata : FileMetadata
+            Metadata object for incoming file
+        sender : str
+            Username of sender
+        peer_socket : socket.socket
+            Socket of sender
+        """
+
+        # Create new socket for receiving file
+        file_recv_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        file_recv_socket.bind((CLIENT_IP, 0))
+        file_recv_socket.listen()
+        file_recv_port = file_recv_socket.getsockname()[1]
+        logging.debug(f"file recv on port {file_recv_port}")
+        # Notify sender of the new port
+        response = str(file_recv_port).encode(FMT)
+        response_header = f"{HeaderCode.DIRECT_TRANSFER_REQUEST.value}{len(response):<{HEADER_MSG_LEN}}".encode(FMT)
+        peer_socket.send(response_header + response)
+        logging.debug("file accepted")
+        # Start file receive thread in pool
+        recv_direct_transfer_worker = ReceiveDirectTransferWorker(metadata, sender, file_recv_socket)
+        recv_direct_transfer_worker.signals.receiving_new_file.connect(self.new_file_progress)
+        recv_direct_transfer_worker.signals.file_progress_update.connect(self.update_file_progress)
+        recv_direct_transfer_worker.signals.file_download_complete.connect(self.remove_progress_widget)
+        recv_direct_transfer_worker.signals
+        recv_direct_transfer_pool = QThreadPool.globalInstance()
+        recv_direct_transfer_pool.start(recv_direct_transfer_worker)
+
+    def direct_transfer_reject(self, peer_socket: socket.socket) -> None:
+        """Helper method for rejecting a direct transfer request.
+
+        Sends a rejection message (-1) to the sender.
+
+        Parameters
+        ----------
+        peer_socket : socket.socket
+            Socket of sender
+        """
+
+        # Notify sender that file was rejected
+        rejection = b"-1"
+        rejection_header = f"{HeaderCode.DIRECT_TRANSFER_REQUEST}{len(rejection):<{HEADER_MSG_LEN}}".encode(FMT)
+        peer_socket.send(rejection_header + rejection)
+
+    def open_global_search(self, MainWindow: MainWindow) -> None:
+        """Slot function to open the file search dialog.
+
+        Parameters
+        ----------
+        MainWindow : MainWindow
+            Instance of the application's main window.
+        """
+
+        signals = Signals()
+        global_search_dialog = QDialog(MainWindow)
+        global_search_dialog.ui = Ui_FileSearchDialog(
+            global_search_dialog, client_send_socket, server_socket_mutex, signals.start_download
+        )
+        global_search_dialog.ui.start_download.connect(self.download_from_global_search)
+        global_search_dialog.exec()
+
+    def download_from_global_search(self, item: ItemSearchResult) -> None:
+        """Slot function to start download for a search result
+
+        Connected to the start_download signal.
+
+        Parameters
+        ----------
+        item : ItemSearchResult
+            The selected search result object.
+        """
+
+        global selected_file_items
+        global selected_uname
+        # Temporarily set selected items using search dialog data
+        selected_file_items = [item["data"]]
+        selected_uname = item["owner"]
+        # Run download method
+        self.download_files()
+        # Reset selected items
+        self.on_file_item_selected()
+        items = self.lw_OnlineStatus.selectedItems()
+        if len(items):
+            item = items[0]
+            username: str = item.data(Qt.UserRole)
+            selected_uname = username
