@@ -5,11 +5,8 @@ name = "pypi"
 
 [packages]
 msgpack = "*"
-prompt-toolkit = "*"
-tqdm = "*"
-PyQt5 = "*"
+pyqt5 = "==5.15.6"
 notify-py = "*"
-fuzzysearch = "*"
 
 [dev-packages]
 black = "*"
