@@ -66,6 +66,7 @@ sys.path.append("../")
 from utils.constants import (
     CLIENT_RECV_PORT,
     CLIENT_SEND_PORT,
+    DIRECT_TEMP_FOLDER_PATH,
     FILE_BUFFER_LEN,
     FMT,
     HEADER_MSG_LEN,
@@ -132,6 +133,12 @@ client_send_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 client_recv_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 client_send_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 client_recv_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+client_recv_socket.setsockopt(socket.SOL_SOCKET, socket.SO_PRIORITY, 0x06)
+client_send_socket.setsockopt(socket.SOL_SOCKET, socket.SO_PRIORITY, 0x06)
+
+# Mark packets with TOS value of IPTOS_THROUGHPUT and IPTOS_LOWDELAY to optimize for throughput and low delay
+client_recv_socket.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x10 | 0x08)
+client_send_socket.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x10 | 0x08)
 
 # Binding sockets
 client_send_socket.bind((CLIENT_IP, CLIENT_SEND_PORT))
@@ -312,7 +319,8 @@ class HeartbeatWorker(QObject):
                 )
                 sys.exit(
                     show_error_dialog(
-                        "An error occurred while communicating with the server.\nTry reconnecting or check the server logs.",
+                        "An error occurred while communicating with the server.\n\
+                        Try reconnecting or check the server logs.",
                         True,
                     )
                 )
@@ -353,7 +361,7 @@ class ReceiveDirectTransferWorker(QRunnable):
             # Accept connection from the sender
             sender, _ = self.file_recv_socket.accept()
             # Temporary path to write the file to while the download is not complete
-            temp_path: Path = TEMP_FOLDER_PATH / self.sender / self.metadata["path"]
+            temp_path: Path = DIRECT_TEMP_FOLDER_PATH / self.sender / self.metadata["path"]            
             # Final download path in the user's download folder to move the file to after the download is complete
             final_download_path: Path = get_unique_filename(
                 Path(user_settings["downloads_folder_path"]) / self.sender / self.metadata["path"],
@@ -374,7 +382,7 @@ class ReceiveDirectTransferWorker(QRunnable):
                 with temp_path.open(mode="wb") as file_to_write:
                     byte_count = 0
                     hash = hashlib.sha1()
-                    self.signals.receiving_new_file.emit((temp_path, self.metadata["size"]))
+                    self.signals.receiving_new_file.emit((temp_path, self.metadata["size"], False))                    
                     while True:
                         logging.debug(msg="Obtaining file chunk")
 
@@ -416,7 +424,7 @@ class ReceiveDirectTransferWorker(QRunnable):
                         show_error_dialog(f"Failed integrity check for file {self.metadata['path']}.")
         except Exception as e:
             logging.exception(msg=f"Failed to receive file: {e}")
-            show_error_dialog(f"Failed to receive file:\n{e}")
+            show_error_dialog(f"Failed to receive file: {e}")
         finally:
             # Close the connection with the sender
             self.file_recv_socket.close()
@@ -455,6 +463,8 @@ class HandleFileRequestWorker(QRunnable):
         # Open a new socket for sending the file
         file_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         file_send_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        file_send_socket.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x10 | 0x08)
+        file_send_socket.setsockopt(socket.SOL_SOCKET, socket.SO_PRIORITY, 0x06)
         try:
             # Attempt to connect to the requester at the given address
             file_send_socket.connect(self.requester)
@@ -467,7 +477,7 @@ class HandleFileRequestWorker(QRunnable):
             # If request_hash is set, compute the hash of the file before sending it
             if self.request_hash:
                 hash = get_file_hash(str(self.filepath))
-
+            print ("hanndler hash:", hash)
             # Create the file metadata, encode it and send it to the requester
             filemetadata: FileMetadata = {
                 "path": str(self.filepath).removeprefix(user_settings["share_folder_path"] + "/"),
@@ -518,7 +528,7 @@ class HandleFileRequestWorker(QRunnable):
                 server_socket_mutex.unlock()
         except Exception as e:
             logging.exception(f"File Sending failed: {e}")
-            show_error_dialog(f"File Sending failed.\n{e}")
+            show_error_dialog(f"File Sending failed. {e}")
         finally:
             file_send_socket.close()
 
@@ -640,7 +650,7 @@ class ReceiveHandler(QObject):
                             file_req_header["request_hash"],
                             file_req_header["resume_offset"],
                         )
-                        self.send_file_pool.start(send_file_handler)
+                        self.send_file_pool.start(send_file_handler, QThread.HighPriority)  # type: ignore
                         return None
                     # If the requested file exists and is a directory
                     elif requested_file_path.is_dir():
@@ -715,7 +725,7 @@ class ReceiveHandler(QObject):
                         connected.append(peer_socket)
                     except Exception as e:
                         logging.exception(msg=e)
-                        show_error_dialog("Error occured when obtaining peer data.\n{e}")
+                        show_error_dialog("Error occured when obtaining peer data. {e}")
                         break
                 else:
                     # Incoming packet from a connected peer
@@ -736,7 +746,7 @@ class ReceiveHandler(QObject):
                                 notif.message = f"{username}: {message_content}"
                                 notif.send()
                             # Store the message in the messages_store
-                            messages_store.get(username, []).append(message)
+                            messages_store.setdefault(username, []).append(message)                            
                             # Emit the message_received signal to update the message area
                             self.message_received.emit(message)
                     except RequestException as e:
@@ -790,13 +800,15 @@ class SendFileWorker(QObject):
             server_socket_mutex.unlock()
             uname_to_ip[selected_uname] = self.peer_ip
         else:
-            self.peer_ip = uname_to_ip.get(selected_uname)  # type:ignore
-
+            self.peer_ip = uname_to_ip[selected_uname]
+            
         if self.peer_ip is not None:
             # Open a new socket to connect to the peer
             self.client_peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.client_peer_socket.connect((self.peer_ip, CLIENT_RECV_PORT))
-
+            self.client_peer_socket.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x10 | 0x08)
+            self.client_peer_socket.setsockopt(socket.SOL_SOCKET, socket.SO_PRIORITY, 0x06)
+            
     def run(self):
         """Sends the file at filepath to the selected peer"""
 
@@ -809,6 +821,7 @@ class SendFileWorker(QObject):
                 "size": self.filepath.stat().st_size,
                 "hash": get_file_hash(str(self.filepath)),
             }
+            print("hash:", filemetadata["hash"])
             logging.debug(filemetadata)
             filemetadata_bytes = msgpack.packb(filemetadata)
             logging.debug(filemetadata_bytes)
@@ -817,6 +830,10 @@ class SendFileWorker(QObject):
 
             # Open a new socket to transmit the file
             file_send_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            file_send_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            file_send_socket.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x10 | 0x08)
+            file_send_socket.setsockopt(socket.SOL_SOCKET, socket.SO_PRIORITY, 0x06)
+            
             file_to_send: BufferedReader
             try:
                 logging.debug(f"Sending file {self.filepath} to {selected_uname}")
@@ -861,7 +878,7 @@ class SendFileWorker(QObject):
                             print("\nFile Sent")
             except Exception as e:
                 logging.exception(f"Direct transfer failed: {e}")
-                show_error_dialog(f"Failed to send file.\n{e}")
+                show_error_dialog(f"Failed to send file. {e}")
             finally:
                 file_send_socket.close()
 
@@ -869,7 +886,7 @@ class SendFileWorker(QObject):
             logging.error(f"{self.filepath} not found")
             show_error_dialog("Selected file does not exist.")
             print(
-                f"\nUnable to perform send request\
+                f"\nUnable to perform send request\n\
                 ensure that the file is available in {user_settings['share_folder_path']}"
             )
         # Emit the completed event
@@ -956,6 +973,9 @@ class RequestFileWorker(QRunnable):
             # Open a new socket to listen for the incoming file transfer from the sender
             file_recv_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             file_recv_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            file_recv_socket.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x10 | 0x08)
+            file_recv_socket.setsockopt(socket.SOL_SOCKET, socket.SO_PRIORITY, 0x06)
+            
             file_recv_socket.bind((CLIENT_IP, 0))
             file_recv_socket.listen()
 
@@ -1032,8 +1052,8 @@ class RequestFileWorker(QRunnable):
                                     # then emit the receiving_new_file signal to create a progress bar
                                     if offset == 0 or progress_widgets.get(temp_path) is None:
                                         if self.parent_dir is None:
-                                            self.signals.receiving_new_file.emit((temp_path, file_header["size"]))
-
+                                            self.signals.receiving_new_file.emit((temp_path, file_header["size"], True))
+                                            
                                     # Keep receiving file chunks until no more chunks are received
                                     # or if the transfer is paused
                                     while True:
@@ -1097,21 +1117,21 @@ class RequestFileWorker(QRunnable):
                                         transfer_progress[temp_path]["status"] = TransferStatus.FAILED
                                         logging.error(msg=f"Failed integrity check for file {file_header['path']}")
                                         show_error_dialog(
-                                            f"Failed integrity check for\
-                                            file {file_header['path']}.\nTry downloading it again."
+                                            f"Failed integrity check for\n\                                                
+                                            file {file_header['path']}. Try downloading it again."
                                         )
                                 except Exception as e:
                                     logging.exception(e)
-                                    show_error_dialog(f"File received but failed to save.\n{e}")
+                                    show_error_dialog(f"File received but failed to save. {e}")
                             except Exception as e:
                                 logging.exception(e)
-                                show_error_dialog("Unable to write file.\n{e}")
+                                show_error_dialog("Unable to write file. {e}")
                         else:
                             logging.error(
                                 msg=f"Not enough space to receive file {file_header['path']}, {file_header['size']}"
                             )
                             show_error_dialog(
-                                f"Insufficient storage. You need at\
+                                f"Insufficient storage. You need at\n\                                    
                                 least {convert_size(file_header['size'])} of space to receive {file_header['path']}.",
                                 True,
                             )
@@ -1138,7 +1158,7 @@ class RequestFileWorker(QRunnable):
                     raise err
         except Exception as e:
             logging.exception(e)
-            show_error_dialog(f"Error occurred when requesting file.\n{e}")
+            show_error_dialog(f"Error occurred when requesting file. {e}")
         finally:
             # Close the socket
             self.client_peer_socket.close()
@@ -1293,28 +1313,28 @@ class Ui_FluxMainWindow(QWidget):
             self.heartbeat_worker.moveToThread(self.heartbeat_thread)
             self.heartbeat_thread.started.connect(self.heartbeat_worker.run)
             self.heartbeat_worker.update_status.connect(self.update_online_status)
-            self.heartbeat_thread.start()
-
+            self.heartbeat_thread.start(QThread.LowestPriority)  # type: ignore
+            
             # self.save_progress_thread = QThread()
             # self.save_progress_worker = SaveProgressWorker()
             # self.save_progress_worker.moveToThread(self.save_progress_thread)
             # self.save_progress_thread.started.connect(self.save_progress_worker.run)
-            # self.save_progress_thread.start()
-
+            # self.save_progress_thread.start(QThread.LowestPriority) # type: ignore
+            
             self.receive_thread = QThread()
             self.receive_worker = ReceiveHandler()
             self.receive_worker.moveToThread(self.receive_thread)
             self.receive_thread.started.connect(self.receive_worker.run)  # type: ignore
             self.receive_worker.message_received.connect(self.messages_controller)
             self.receive_worker.file_incoming.connect(self.direct_transfer_controller)
-            self.receive_thread.start()
+            self.receive_thread.start(QThread.HighestPriority)  # type: ignore
 
         except Exception as e:
             logging.error(f"Could not connect to server: {e}")
             sys.exit(
                 show_error_dialog(
-                    f"Could not connect to server:\
-                    {e}\nEnsure that the server is online and you have entered the correct server IP.",
+                    f"Could not connect to server: {e}\n\                        
+                    \nEnsure that the server is online and you have entered the correct server IP.",
                     True,
                 )
             )
@@ -1326,7 +1346,7 @@ class Ui_FluxMainWindow(QWidget):
                 progress_widgets_dump.seek(0)
                 progress_widgets_readable: dict[Path, ProgressBarData] = pickle.load(progress_widgets_dump)
                 for path, data in progress_widgets_readable.items():
-                    self.new_file_progress((path, data["total"]))
+                    self.new_file_progress((path, data["total"], True))                    
                     progress_widgets[path].ui.update_progress(data["current"])
                     progress_widgets[path].ui.btn_Toggle.setText("▶")
                     progress_widgets[path].ui.paused = True
@@ -1381,9 +1401,10 @@ class Ui_FluxMainWindow(QWidget):
                 else:
                     messages_store[selected_uname] = [{"sender": self_uname, "content": msg}]
                 self.render_messages(messages_store[selected_uname])
+                
             except Exception as e:
                 logging.error(f"Failed to send message: {e}")
-                show_error_dialog(f"Failed to send message.\n{e}")
+                show_error_dialog(f"Failed to send message. {e}")
             finally:
                 self.txtedit_MessageInput.clear()
         else:
@@ -1460,6 +1481,11 @@ class Ui_FluxMainWindow(QWidget):
         request_file_pool = QThreadPool.globalInstance()
 
         for selected_item in selected_file_items:
+            # Prevent download of an item that is actively being downloaded
+            print(selected_item["path"], transfer_progress.keys())
+            if TEMP_FOLDER_PATH / selected_uname / selected_item["path"] in transfer_progress:
+                show_error_dialog("This item is already being downloaded")
+                continue            
             server_socket_mutex.lock()
             peer_ip = ""
             # Use cache to obtain peer ip
@@ -1484,8 +1510,8 @@ class Ui_FluxMainWindow(QWidget):
                 request_file_worker.signals.receiving_new_file.connect(self.new_file_progress)
                 request_file_worker.signals.file_progress_update.connect(self.update_file_progress)
                 request_file_worker.signals.file_download_complete.connect(self.remove_progress_widget)
-                request_file_pool.start(request_file_worker)
-            # Start folder download threads in pool
+                request_file_pool.start(request_file_worker, QThread.TimeCriticalPriority)  # type: ignore
+                # Start folder download threads in pool
             else:
                 files_to_request: list[DirData] = []
                 get_files_in_dir(
@@ -1500,7 +1526,7 @@ class Ui_FluxMainWindow(QWidget):
                     "status": TransferStatus.DOWNLOADING,
                     "mutex": QMutex(),
                 }
-                self.new_file_progress((dir_path, dir_progress[dir_path]["total"]))
+                self.new_file_progress((dir_path, dir_progress[dir_path]["total"], True))                
                 # Add transfer progress for all files in folder
                 for f in files_to_request:
                     transfer_progress[TEMP_FOLDER_PATH / selected_uname / f["path"]] = {
@@ -1511,8 +1537,8 @@ class Ui_FluxMainWindow(QWidget):
                 for file in files_to_request:
                     request_file_worker = RequestFileWorker(file, peer_ip, selected_uname, dir_path)
                     request_file_worker.signals.dir_progress_update.connect(self.update_dir_progress)
-                    request_file_pool.start(request_file_worker)
-
+                    request_file_pool.start(request_file_worker, QThread.TimeCriticalPriority)  # type: ignore
+                    
     def messages_controller(self, message: Message) -> None:
         """Method to conditionally render chat messages.
 
@@ -1529,8 +1555,8 @@ class Ui_FluxMainWindow(QWidget):
         global self_uname
         # Only start rendering if selected user is sender
         if message["sender"] == selected_uname:
-            self.render_messages(messages_store[selected_uname])
-
+            self.render_messages(messages_store.get(selected_uname, []))
+            
     def render_messages(self, messages_list: list[Message] | None) -> None:
         """Performs the render operation for chat messages.
 
@@ -1824,11 +1850,11 @@ class Ui_FluxMainWindow(QWidget):
         self.lw_OnlineStatus.setSelectionMode(QAbstractItemView.SingleSelection)
         self.lw_OnlineStatus.itemSelectionChanged.connect(self.on_user_selection_changed)  # type: ignore
         self.icon_Online = QIcon()
-        self.icon_Online.addFile("ui/res/earth.png", QSize(), QIcon.Normal, QIcon.Off)  # type: ignore
+        self.icon_Online.addFile("client/ui/res/earth.png", QSize(), QIcon.Normal, QIcon.Off)  # type: ignore
 
         self.icon_Offline = QIcon()
-        self.icon_Offline.addFile("ui/res/web-off.png", QSize(), QIcon.Normal, QIcon.Off)  # type: ignore
-
+        self.icon_Offline.addFile("client/ui/web-off.png", QSize(), QIcon.Normal, QIcon.Off)  # type: ignore
+        
         self.lw_OnlineStatus.setObjectName("listWidget")
         self.lw_OnlineStatus.setSortingEnabled(False)
 
@@ -2081,8 +2107,8 @@ class Ui_FluxMainWindow(QWidget):
         self.send_file_worker.completed.connect(self.send_file_worker.deleteLater)
         self.send_file_thread.finished.connect(self.send_file_thread.deleteLater)  # type: ignore
 
-        self.send_file_thread.start()
-
+        self.send_file_thread.start(QThread.HighPriority)  # type: ignore
+        
     def pause_download(self, path: Path) -> None:
         """Slot function to pause an active download.
 
@@ -2151,7 +2177,7 @@ class Ui_FluxMainWindow(QWidget):
             worker = RequestFileWorker(file_item, peer_ip, uname, None)
             worker.signals.file_progress_update.connect(self.update_file_progress)
             worker.signals.file_download_complete.connect(self.remove_progress_widget)
-            pool.start(worker)
+            pool.start(worker, QThread.TimeCriticalPriority)  # type: ignore
         elif path.is_dir():
             # Obtain paused files in requested directory
             paused_items: list[DirData] = []
@@ -2206,7 +2232,7 @@ class Ui_FluxMainWindow(QWidget):
         else:
             logging.info(f"Could not find progress widget for {path}")
 
-    def new_file_progress(self, data: tuple[Path, int]) -> None:
+    def new_file_progress(self, data: tuple[Path, int, bool]) -> None:
         """UI utility method to render a new progress widget for a new or resumed download.
 
         Parameters
@@ -2219,11 +2245,7 @@ class Ui_FluxMainWindow(QWidget):
         global progress_widgets
         file_progress_widget = QWidget(self.scrollContents_FileProgress)
         file_progress_widget.ui = Ui_FileProgressWidget(
-            file_progress_widget,
-            data[0],
-            data[1],
-            self.signals.pause_download,
-            self.signals.resume_download,
+            file_progress_widget, data[0], data[1], self.signals.pause_download, self.signals.resume_download, data[2]
         )
         self.vBoxLayout_ScrollContents.addWidget(file_progress_widget)
         progress_widgets[data[0]] = file_progress_widget
@@ -2282,6 +2304,8 @@ class Ui_FluxMainWindow(QWidget):
         global ip_to_uname
         metadata, peer_socket = data
         username = ip_to_uname[peer_socket.getpeername()[0]]
+        # Prevent download of an item that is actively being downloaded
+
         # Construct user consent message box
         message_box = QMessageBox(self.MainWindow)
         message_box.setIcon(QMessageBox.Question)
@@ -2313,6 +2337,10 @@ class Ui_FluxMainWindow(QWidget):
 
         # Create new socket for receiving file
         file_recv_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        file_recv_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        file_recv_socket.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x10 | 0x08)
+        file_recv_socket.setsockopt(socket.SOL_SOCKET, socket.SO_PRIORITY, 0x06)
+        
         file_recv_socket.bind((CLIENT_IP, 0))
         file_recv_socket.listen()
         file_recv_port = file_recv_socket.getsockname()[1]
@@ -2329,8 +2357,8 @@ class Ui_FluxMainWindow(QWidget):
         recv_direct_transfer_worker.signals.file_download_complete.connect(self.remove_progress_widget)
         recv_direct_transfer_worker.signals
         recv_direct_transfer_pool = QThreadPool.globalInstance()
-        recv_direct_transfer_pool.start(recv_direct_transfer_worker)
-
+        recv_direct_transfer_pool.start(recv_direct_transfer_worker, QThread.TimeCriticalPriority)  # type: ignore
+        
     def direct_transfer_reject(self, peer_socket: socket.socket) -> None:
         """Helper method for rejecting a direct transfer request.
 

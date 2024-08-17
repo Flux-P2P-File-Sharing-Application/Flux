@@ -22,6 +22,7 @@ app_dir.mkdir(exist_ok=True)
 (app_dir / "share").mkdir(exist_ok=True)
 (app_dir / "compressed").mkdir(exist_ok=True)
 (app_dir / "tmp").mkdir(exist_ok=True)
+(app_dir / "direct").mkdir(exist_ok=True)
 
 sys.path.append("client")
 from ui.StartWindow import Ui_StartWindow

@@ -11,7 +11,6 @@ COPY ./utils ./utils
 COPY ./share ../share
 
 RUN pip install pipenv
-RUN pipenv install --system --deploy --ignore-pipfile
 # RUN mkdir ../share
 RUN mkdir ../share/sub
 
@@ -25,7 +24,5 @@ RUN apt-get update
 RUN apt-get install -y xauth
 
 EXPOSE 8887
-
-RUN xauth add legion/unix:  MIT-MAGIC-COOKIE-1  50258766dfae525d25243e9de1c92ff1
 
 # ENTRYPOINT [ "python", "app.py" ]

@@ -39,7 +39,8 @@
 2. **Start the Server**: Use the following command to run the server:
 
    ```sh
-   pipenv run python -m src.server.server
+   cd src/server
+   pipenv run python server.py
    ```
 
 ### Running the Client
@@ -47,5 +48,6 @@
 1. **Start the Client**: Use the following command to run the client:
 
    ```sh
-   pipenv run python -m src.client.client
+   cd src/client
+   pipenv run python app.py
    ```

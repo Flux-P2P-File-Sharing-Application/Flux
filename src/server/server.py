@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from pprint import pformat
+import os
 
 # Imports (PyPI)
 import msgpack
@@ -28,7 +29,6 @@ app_dir.mkdir(exist_ok=True)
 (app_dir / "logs").mkdir(exist_ok=True)
 (app_dir / "db").mkdir(exist_ok=True)
 
-
 # Logging configuration
 logging.basicConfig(
     level=logging.DEBUG,
@@ -39,6 +39,8 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout),
     ],
 )
+
+logging.debug("Logging configuration test.")
 
 # Load share database
 Flux_db = TinyDB(f"{str(Path.home())}/.Flux/db/db.json")
@@ -51,6 +53,10 @@ server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 # Configuring the socket to reuse addresses and immediately transmit data
 server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+# Mark packets with TOS value of IPTOS_THROUGHPUT and IPTOS_LOWDELAY to optimize for throughput and low delay
+server_socket.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0x10 | 0x08)
+server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_PRIORITY, 0x06)
 
 # Bind the socket and make it listen for new connections from peers
 server_socket.bind((IP, SERVER_RECV_PORT))
@@ -113,7 +119,7 @@ def receive_msg(client_socket: socket.socket) -> SocketMessage:
             return {"type": HeaderCode(message_type), "query": "online"}
         else:
             # If any query is sent, update the last seen to the current time
-            username = ip_to_uname.get(notified_socket.getpeername()[0])
+            username = ip_to_uname.get(client_socket.getpeername()[0])
             if username is not None:
                 uname_to_status[username] = time.time()
             elif message_type != HeaderCode.NEW_CONNECTION.value:
